@@ -6,6 +6,7 @@
 -- - the transform gets a copy, and a copy of its result is stored (nil means cancel);
 -- - if the record changed between the read and the write, the transform runs again on a fresh
 --   copy, so a transform may run more than once and only the last run is committed;
+-- - a value a real DataStore could not hold is refused (see assertStorable);
 -- - a call can fail before anything is written, or after the write has landed.
 -- `hookNext` runs code between the read and the write (it may write the record itself, or
 -- yield the calling thread), which is how tests interleave two calls.
@@ -70,6 +71,54 @@ function FakeDataStore.hookNext(self: FakeDataStore, hook: (key: string) -> ())
 	table.insert(self.hooks, hook)
 end
 
+-- Refuses what a real DataStore cannot hold, naming where: a function, userdata or thread, a number
+-- that is not finite, a table mixing string and number keys, a table whose number keys are not
+-- exactly 1..n, a cycle, or a key that is neither string nor number.
+local function assertStorable(value: any, path: string, ancestors: { [any]: boolean }?)
+	local kind = type(value)
+	if kind == "function" or kind == "userdata" or kind == "thread" then
+		error(`not storable at {path}: a {kind}`)
+	end
+	if kind == "number" then
+		if value ~= value or value == math.huge or value == -math.huge then
+			error(`not storable at {path}: a number that is not finite`)
+		end
+		return
+	end
+	if kind ~= "table" then
+		return
+	end
+	local seen = ancestors or {}
+	if seen[value] then
+		error(`not storable at {path}: a cyclic table`)
+	end
+	seen[value] = true
+	local strings, numbers = 0, 0
+	for key in value do
+		if type(key) == "string" then
+			strings += 1
+		elseif type(key) == "number" then
+			numbers += 1
+		else
+			error(`not storable at {path}: a key that is a {type(key)}`)
+		end
+	end
+	if strings > 0 and numbers > 0 then
+		error(`not storable at {path}: string and number keys mixed`)
+	end
+	if numbers > 0 then
+		for i = 1, numbers do
+			if value[i] == nil then
+				error(`not storable at {path}: number keys are not exactly 1..{numbers}`)
+			end
+		end
+	end
+	for key, child in value do
+		assertStorable(child, if type(key) == "number" then `{path}[{key}]` else `{path}.{key}`, seen)
+	end
+	seen[value] = nil
+end
+
 function FakeDataStore.UpdateAsync(self: FakeDataStore, key: string, transform: (any) -> any): any
 	self.calls += 1
 	if self.events then
@@ -89,6 +138,9 @@ function FakeDataStore.UpdateAsync(self: FakeDataStore, key: string, transform: 
 		local before = self.records[key]
 		local result = transform(Deep.copy(before))
 		self.runs += 1
+		if result ~= nil then
+			assertStorable(result, "value")
+		end
 		if hook then
 			local run = hook
 			hook = nil

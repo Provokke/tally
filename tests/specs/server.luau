@@ -1,0 +1,149 @@
+--!strict
+-- The server entry script itself, run under Lune over FakeGame: it starts, makes its remotes and
+-- the TallyRecord function, refuses a bad config, and starts in Studio on an unpublished place with
+-- in-memory stores for both the data and the board.
+local Config = require("../../src/shared/Config")
+local FakeGame = require("../fakes/FakeGame")
+
+local function started(options: any?): any
+	local world = FakeGame.new(options)
+	world:start()
+	assert(world.started == true, world.startError)
+	return world
+end
+
+local function warned(world: any, text: string): boolean
+	for _, line in world.warnings do
+		if string.find(line, text, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+return {
+	{
+		name = "the script starts and makes Request, Sync and TallyRecord, with no errors",
+		run = function()
+			local world = started()
+			assert(world:remote("Request") ~= nil and world:remote("Request").ClassName == "RemoteEvent")
+			assert(world:remote("Sync") ~= nil and world:remote("Sync").ClassName == "RemoteEvent")
+			local record = world:remote("TallyRecord")
+			assert(
+				record ~= nil and record.ClassName == "BindableFunction",
+				"TallyRecord is a BindableFunction"
+			)
+			assert(record.OnInvoke ~= nil, "and it is wired")
+			assert(world.serverStorage.Children[1] == record, "it lives in ServerStorage")
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
+		name = "a config that fails its checks warns and creates nothing",
+		run = function()
+			local bad = table.clone(Config)
+			bad.PodiumSize = 0
+			local world = FakeGame.new({ config = bad })
+			world:start()
+			assert(world.started == true, world.startError)
+			assert(world:remote("Request") == nil and world:remote("Sync") == nil, "no remotes")
+			assert(world:remote("TallyRecord") == nil, "no TallyRecord")
+			assert(#world.serverStorage.Children == 0, "nothing in ServerStorage")
+			assert(warned(world, "config problem"), "the problem is warned about")
+			assert(warned(world, "PodiumSize"), "and named")
+		end,
+	},
+	{
+		name = "a module that fails to load surfaces as a start error",
+		run = function()
+			local world = FakeGame.new({ failRequire = "Tally" })
+			world:start()
+			assert(world.started == false, "did not start")
+			assert(world.startError ~= nil and string.find(world.startError, "Tally failed to load", 1, true))
+		end,
+	},
+	{
+		name = "a shared folder that never arrives leaves the script waiting without an error",
+		run = function()
+			local world = FakeGame.new({ blockShared = true })
+			world:start()
+			assert(world.started == nil and world.startError == nil, "still waiting")
+			assert(world:remote("Request") == nil)
+		end,
+	},
+	{
+		name = "a joining player is synced with the starting profile and the current season",
+		run = function()
+			local world = started({ start = Config.Epoch + 10 })
+			world:join(1)
+			local sync = world:lastSync(1)
+			assert(sync ~= nil, "synced")
+			assert(sync.coins == Config.StartingCoins and sync.score == 0)
+			assert(sync.season.id == 1, tostring(sync.season and sync.season.id))
+			assert(sync.season.endsAt == Config.Epoch + Config.SeasonLengthSeconds)
+			assert(#sync.notices == 0)
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
+		-- The saleyards lesson: a Studio place that was never published can't reach DataStoreService,
+		-- so the data AND the board must be in memory or the script stops at startup.
+		name = "Studio on an unpublished place starts, a player scores and the in-memory board takes a push",
+		run = function()
+			local world = started({ studio = true, unpublished = true, start = Config.Epoch + 10 })
+			assert(world.ds.calls == 0, "no real data store was touched")
+			assert(world.ordered["tally-1"] == nil, "and no real ordered store was made")
+			assert(warned(world, "Studio") == false, "it printed, it did not warn")
+			world:join(1)
+			world.sched:advance(1)
+			assert(world:lastSync(1) ~= nil, "joined")
+			local ok, why = world:record(1, 30)
+			assert(ok and why == nil, tostring(why))
+			world.sched:advance(Config.BoardPushSeconds + 1)
+			assert(#world.memoryBoards == 1, "the script made one in-memory board")
+			assert(world.memoryBoards[1]:GetAsync("1") == 30, "and it holds the pushed score")
+			assert(#world.errors == 0, world.errors[1])
+			assert(not warned(world, "failed"), world.warnings[1])
+		end,
+	},
+	{
+		name = "a Studio demo season is DemoSeasonSeconds long in the first Sync",
+		run = function()
+			local world = started({
+				studio = true,
+				attributes = { TallyDemoSeason = true },
+				start = Config.Epoch + 500,
+			})
+			world:join(1)
+			local season = world:lastSync(1).season
+			local startsAt = Config.Epoch + (season.id - 1) * Config.DemoSeasonSeconds
+			assert(
+				season.endsAt - startsAt == Config.DemoSeasonSeconds,
+				`season {season.id} ends {season.endsAt}`
+			)
+			assert(season.id == 500 // Config.DemoSeasonSeconds + 1, "the id follows the demo length")
+			-- control: the same attribute outside Studio is ignored
+			local live = started({ attributes = { TallyDemoSeason = true }, start = Config.Epoch + 500 })
+			live:join(1)
+			assert(live:lastSync(1).season.id == 1, "a live server keeps the real length")
+		end,
+	},
+	{
+		name = "Studio with TallyUseDataStore on an unpublished place fails on its first store call, logged not thrown",
+		run = function()
+			local world = FakeGame.new({
+				studio = true,
+				unpublished = true,
+				attributes = { TallyUseDataStore = true },
+			})
+			world:start()
+			assert(world.started == false, "the script stopped")
+			assert(
+				world.startError ~= nil
+					and string.find(world.startError, "You must publish this place", 1, true),
+				tostring(world.startError)
+			)
+			assert(world:remote("TallyRecord") == nil, "nothing was made")
+		end,
+	},
+}

@@ -109,4 +109,49 @@ return {
 			assert(h:GetAsync("a").n == 3, "a write that returns refreshes the cache")
 		end,
 	},
+	{
+		name = "a value a real DataStore could not hold is refused, naming where, and the record is unchanged",
+		run = function()
+			local function write(ds: any, value: any): (boolean, string)
+				local ok, err = pcall(function()
+					ds:UpdateAsync("k", function()
+						return value
+					end)
+				end)
+				return ok, tostring(err)
+			end
+			local ds = FakeDataStore.new({ k = { keep = true } })
+			local ok = write(ds, {
+				coins = 5,
+				lifetime = {},
+				seasons = { ["3"] = { score = 1, rewarded = false } },
+				streak = { day = 0, count = 0, earned = 0 },
+				notices = { { text = "a", at = 1 } },
+			})
+			assert(ok, "a profile-shaped table is stored")
+			assert(write(ds, { 1, 2, 3 }), "a plain array is stored")
+			ds.records.k = { keep = true }
+
+			local sparse, err = write(ds, { seasons = { [3] = {} } })
+			assert(not sparse and string.find(err, "seasons", 1, true), err)
+			assert(string.find(err, "not storable", 1, true), err)
+			local gap, gapErr = write(ds, { [1] = 1, [3] = 3 })
+			assert(not gap and string.find(gapErr, "not storable", 1, true), gapErr)
+			local mixedTable: any = { 1 }
+			mixedTable.name = "x"
+			local mixed = write(ds, mixedTable)
+			assert(not mixed, "string and number keys mixed")
+			local nan = write(ds, { n = 0 / 0 })
+			assert(not nan, "NaN")
+			local inf = write(ds, { n = math.huge })
+			assert(not inf, "infinity")
+			local fn = write(ds, { f = function() end })
+			assert(not fn, "a function")
+			local cyclic: any = {}
+			cyclic.self = cyclic
+			assert(not write(ds, cyclic), "a cycle")
+			assert(not write(ds, { [true] = 1 }), "a boolean key")
+			assert(ds.records.k.keep == true and ds.records.k.coins == nil, "refused writes leave the record")
+		end,
+	},
 }
