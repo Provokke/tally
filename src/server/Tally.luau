@@ -27,12 +27,13 @@ export type Tally = typeof(setmetatable(
 		known: { [number]: any }, -- the last stored value seen for each season id
 		settling: { [number]: boolean },
 		calling: { [number]: boolean },
+		waitedForBoard: { [number]: boolean }, -- seasons whose podium wait has been logged
 	},
 	Tally
 ))
 
 function Tally.new(deps: Deps): Tally
-	return setmetatable({ deps = deps, known = {}, settling = {}, calling = {} }, Tally)
+	return setmetatable({ deps = deps, known = {}, settling = {}, calling = {}, waitedForBoard = {} }, Tally)
 end
 
 function Tally.currentId(self: Tally): number?
@@ -153,7 +154,11 @@ local function closeSeason(self: Tally, id: number, season: any): any?
 		-- an empty podium for everyone. Only once it has stayed unreadable PodiumWaitSeconds past the
 		-- end does the season close without one, so a board that never returns can't block rewards.
 		if closeClock(self) < season.endsAt + deps.config.PodiumWaitSeconds then
-			deps.log(`podium read failed for season {id}, waiting: {tostring(why)}`)
+			-- Logged once per season, not on every poll for every player.
+			if not self.waitedForBoard[id] then
+				self.waitedForBoard[id] = true
+				deps.log(`podium read failed for season {id}, waiting: {tostring(why)}`)
+			end
 			return nil
 		end
 		deps.log(`podium read failed for season {id}, closing without one: {tostring(why)}`)

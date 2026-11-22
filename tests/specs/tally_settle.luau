@@ -87,6 +87,10 @@ local function build(options: any?): any
 			end,
 			save = function(_: number, _staked: any): boolean
 				w.saves += 1
+				if w.parkSave then
+					w.parkSave = false
+					coroutine.yield()
+				end
 				return not w.failSave
 			end,
 		},
@@ -288,6 +292,33 @@ return {
 		end,
 	},
 	{
+		name = "a failed payout save rolls back relative to the current values, keeping a change made while it was in flight",
+		run = function()
+			local w = world()
+			storeOpen(w, 1)
+			w.parkSave = true
+			local run = settleAsync(w, 1)
+			assert(run.paid == nil and w.live[1].coins == 450, "parked in the payout save, payout applied")
+			-- Meanwhile something else changes the profile, as a streak claim would.
+			w.live[1].coins += 5
+			table.insert(w.live[1].notices, { text = "Streak claimed.", at = 1 })
+			w.failSave = true
+			resume(run)
+			assert(run.paid == 0, `paid {run.paid}`)
+			local profile = w.live[1]
+			assert(profile.coins == 5, `the payout is removed and the 5 kept: {profile.coins}`)
+			assert(
+				#profile.notices == 1 and profile.notices[1].text == "Streak claimed.",
+				"only the other notice"
+			)
+			assert(profile.seasons["1"].rewarded == false and profile.seasons["1"].reward == nil)
+			w.failSave = false
+			assert(w.tally:settle(1) == 1)
+			assert(profile.coins == 455 and #profile.notices == 2, `coins {profile.coins}`)
+			assert(w.tally:settle(1) == 0 and profile.coins == 455)
+		end,
+	},
+	{
 		name = "a season key write that raises on the open is logged, pays nothing, and the next settle completes",
 		run = function()
 			local w = world()
@@ -326,6 +357,7 @@ return {
 
 			w.clock.t = 1100 + GRACE + WAIT - 1
 			assert(w.tally:settle(1) == 0, "still waiting one second before the wait runs out")
+			assert(logged(w, "waiting") == 1, "the wait is logged once per season, not on every poll")
 			assert(w.records["season/1"].state == "open")
 
 			w.clock.t = 1100 + GRACE + WAIT
