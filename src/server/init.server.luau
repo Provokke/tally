@@ -282,12 +282,12 @@ tally = Tally.new({
 		-- Saves only the profile the caller changed. If the player has left and come back since,
 		-- that table belongs to a dead session, so saving "their" session would write a different
 		-- profile than the one the caller changed.
-		save = function(userId: number, staked: any): boolean
+		save = function(userId: number, staked: any, undo: (() -> ())?): boolean
 			local session = sessions:writableSession(userId)
 			if session == nil or session.data ~= staked then
 				return false
 			end
-			return sessions:saveNow(userId)
+			return sessions:saveNow(userId, undo)
 		end,
 	},
 	now = os.time,

@@ -898,4 +898,122 @@ return {
 			assert(#world.errors == 0, world.errors[1])
 		end,
 	},
+	{
+		name = "leave 1: a player who leaves while their settle's season read is parked is paid exactly once, never with the Coins missing",
+		run = function()
+			local _, paying = parkedSettle(10) -- shorter than the release's wait for a call still running
+			paying:leave(1)
+			paying.sched:advance(1)
+			assert(coinsOf(paying, 1) == Config.StartingCoins, "nothing paid while the read is parked")
+			paying.sched:advance(Config.CloseTimeoutSeconds + 10)
+			assert(paying.records.Player_1.lease == nil, "released")
+			assert(#paying.errors == 0, paying.errors[1])
+			local data = stored(paying, 1)
+			local paid = data.seasons["1"].rewarded
+			if paid then
+				assert(data.coins == Config.StartingCoins + 450 and #data.notices == 1, "paid with its Coins")
+			else
+				assert(data.coins == Config.StartingCoins and #data.notices == 0, "unpaid, nothing half done")
+			end
+			-- Either way, the next server pays it once: the season ends up paid exactly once.
+			local after = settledAndCounted(paying)
+			assert(coinsOf(after, 1) == Config.StartingCoins + 450, `coins {coinsOf(after, 1)}`)
+			assert(#stored(after, 1).notices == 1, "one notice")
+		end,
+	},
+	{
+		name = "leave 2: a player who leaves while a failing claim save is parked has nothing of the failed claim stored",
+		run = function()
+			local world = started({ start = CLAIM_START })
+			world:join(1)
+			world.sched:advance(2)
+			-- The claim's own write parks, then fails.
+			world.ds:hookNext(function()
+				world.sched:wait(5)
+				error("the write failed")
+			end)
+			world:request(1, "claim_streak")
+			assert(
+				world:lastSync(1).result == nil or world:lastSync(1).result.action ~= "claim_streak",
+				"parked"
+			)
+			world:leave(1)
+			world.sched:advance(1)
+			world.sched:advance(10) -- the save fails at 5 s, the claim is rolled back, then the release lands
+			assert(#world.errors == 0, world.errors[1])
+			assert(world.records.Player_1.lease == nil, "released")
+			local data = stored(world, 1)
+			assert(
+				data.coins == Config.StartingCoins,
+				`the failed claim's Coins reached the store: {data.coins}`
+			)
+			assert(Deep.equal(data.streak, { day = 0, count = 0, earned = 0 }), "streak.day unchanged")
+			assert(#data.notices == 0, "no claim notice stored")
+			local after = settledAndCounted(world, nil, nil, nil, CLAIM_RESTART)
+			assert(coinsOf(after, 1) == Config.StartingCoins and stored(after, 1).streak.day == 0)
+		end,
+	},
+	{
+		name = "leave 3: an autosave queued behind a failing claim save does not store the failed claim before it is rolled back",
+		run = function()
+			local world = started({ start = CLAIM_START })
+			world:join(1)
+			world.sched:advance(2)
+			-- The claim's write parks for 70 s, so the autosave at 60 s queues behind it, then it fails.
+			world.ds:hookNext(function()
+				world.sched:wait(70)
+				error("the write failed")
+			end)
+			world:request(1, "claim_streak")
+			world.sched:advance(71)
+			local sync = world:lastSync(1)
+			assert(
+				sync.result.reason == "save_failed" and sync.coins == Config.StartingCoins,
+				"told it failed"
+			)
+			local data = stored(world, 1)
+			assert(
+				data.coins == Config.StartingCoins,
+				`the autosave stored the failed claim's Coins: {data.coins}`
+			)
+			assert(data.streak.day == 0 and #data.notices == 0, "no streak day, no notice")
+			assert(#world.errors == 0, world.errors[1])
+			world:leave(1)
+			world.sched:advance(5)
+			settledAndCounted(world, nil, nil, nil, CLAIM_RESTART)
+		end,
+	},
+	{
+		name = "leave 4: an autosave queued behind a failing payout save does not store the payout before it is rolled back",
+		run = function()
+			local first = started()
+			scoredAndLeft(first, 1, 60)
+			local paying = payingWorld(first)
+			-- Player_1's second write on the paying server is the payout (the first is the load).
+			local writes = 0
+			for _ = 1, 8 do
+				paying.ds:hookNext(function(key: string)
+					if key == "Player_1" then
+						writes += 1
+						if writes == 2 then
+							paying.sched:wait(70)
+							error("the write failed")
+						end
+					end
+				end)
+			end
+			paying:join(1)
+			paying.sched:advance(71)
+			assert(writes >= 2, "the payout reached its save")
+			local data = stored(paying, 1)
+			assert(data.coins == Config.StartingCoins, `the autosave stored the failed payout: {data.coins}`)
+			assert(data.seasons["1"].rewarded == false and #data.notices == 0)
+			assert(#paying.errors == 0, paying.errors[1])
+			paying.sched:advance(Config.SettleSeconds + 1) -- the next settle pays once
+			assert(coinsOf(paying, 1) == Config.StartingCoins + 450, `coins {coinsOf(paying, 1)}`)
+			paying:leave(1)
+			paying.sched:advance(5)
+			settledAndCounted(paying)
+		end,
+	},
 }

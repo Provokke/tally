@@ -3,9 +3,9 @@
 return {
 	name = "claim_rollback_from_snapshot",
 	file = "src/server/Tally.luau",
-	find = [==[if not deps.profiles.save(userId, profile) then]==],
+	find = [==[if not deps.profiles.save(userId, profile, undo) then]==],
 	replace = [==[local startCoins = profile.coins - claimed.reward
-	local saved = deps.profiles.save(userId, profile)
+	local saved = deps.profiles.save(userId, profile, undo)
 	if not saved then
 		profile.coins = startCoins + claimed.reward]==],
 }

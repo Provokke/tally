@@ -8,7 +8,12 @@ Tally.__index = Tally
 export type Deps = {
 	seasons: any, -- a DataStore handle: UpdateAsync and GetAsync
 	leaderboard: any, -- a Leaderboard
-	profiles: { get: (userId: number) -> any?, save: (userId: number, staked: any) -> boolean },
+	-- save writes the profile the caller changed. `undo`, when given, is run by the save, under the
+	-- session's lock, if the write does not land, so no other write can store the change first.
+	profiles: {
+		get: (userId: number) -> any?,
+		save: (userId: number, staked: any, undo: (() -> ())?) -> boolean,
+	},
 	now: () -> number,
 	serverId: string,
 	length: number, -- season length in seconds
@@ -186,12 +191,20 @@ end
 -- A save that fails rolls the change back relative to the current values.
 local function applyPayout(self: Tally, userId: number, profile: any, key: string, decision: any): boolean
 	local deps = self.deps
-	local undo = deps.Payout.apply(profile, key, decision)
+	local applied = deps.Payout.apply(profile, key, decision)
 	local added = deps.Notices.add(profile, decision.text, deps.now(), deps.config.NoticeCap)
-	local saved = deps.profiles.save(userId, profile)
-	if not saved then
-		deps.Payout.undo(profile, key, undo)
+	local undone = false
+	local function undo()
+		if undone then
+			return
+		end
+		undone = true
+		deps.Payout.undo(profile, key, applied)
 		deps.Notices.remove(profile, added)
+	end
+	local saved = deps.profiles.save(userId, profile, undo)
+	if not saved then
+		undo() -- already done under the lock when the save ran; this covers a save refused before it
 		deps.log(`payout save failed for {userId}`)
 		return false
 	end
@@ -288,7 +301,12 @@ local function claim(self: Tally, userId: number): (boolean, string?, number?)
 		now,
 		deps.config.NoticeCap
 	)
-	if not deps.profiles.save(userId, profile) then
+	local undone = false
+	local function undo()
+		if undone then
+			return
+		end
+		undone = true
 		for _, field in STREAK_FIELDS do
 			if before[field] ~= applied[field] and profile.streak[field] == applied[field] then
 				profile.streak[field] = before[field]
@@ -296,6 +314,9 @@ local function claim(self: Tally, userId: number): (boolean, string?, number?)
 		end
 		profile.coins -= claimed.reward
 		deps.Notices.remove(profile, added)
+	end
+	if not deps.profiles.save(userId, profile, undo) then
+		undo() -- already done under the lock when the save ran; this covers a save refused before it
 		deps.log(`streak save failed for {userId}`)
 		return false, "save_failed", nil
 	end

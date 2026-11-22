@@ -136,6 +136,7 @@ return {
 			local allowed = (limits.StoreBurstPerPlayer + limits.StoreOpsPerMinute)
 				// limits.StoreCost.claim_streak
 			assert(writes <= allowed, `{writes} profile writes in a minute, at most {allowed}`)
+			assert(writes <= 4, `{writes} profile writes in a minute at the shipped config, at most 4`)
 			assert(writes >= 1 and slow > 0, `{writes} writes, {slow} told to slow down`)
 			assert(world.faults.writes - before == writes)
 			local coins = world:lastSync(1).coins

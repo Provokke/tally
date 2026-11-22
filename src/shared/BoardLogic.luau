@@ -157,6 +157,7 @@ local REASONS: { [string]: string } = {
 	busy = "Hold on, still working on your last request.",
 	slow_down = "Too many claims. Wait a moment and try again.",
 	no_profile = "Your data isn't loaded yet.",
+	error = "Something went wrong on our side. Try again in a moment.",
 	bad_day = "The server's day looks wrong. Try again in a moment.",
 }
 

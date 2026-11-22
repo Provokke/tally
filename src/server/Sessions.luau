@@ -211,15 +211,16 @@ end
 -- through the session's own save, which runs one at a time with the autosave and the release of
 -- the same session, so the two never overlap and each writes the data as it is when it runs. A
 -- read-only, lost or released session is never written, so it answers false. A session that finds
--- its lease gone is kicked, as with an autosave.
-function Sessions.saveNow(self: Sessions, userId: number): boolean
+-- its lease gone is kicked, as with an autosave. `undo` is run inside the save's lock if the write
+-- does not land, so the caller's rollback comes before any queued save or release.
+function Sessions.saveNow(self: Sessions, userId: number, undo: (() -> ())?): boolean
 	local session = self.live[userId]
 	if session == nil or session.lost or session.readOnly or session.released then
 		return false
 	end
 	local deps = self.deps
 	local ok, saved = pcall(function()
-		return session:save()
+		return session:save(undo)
 	end)
 	if not ok then
 		deps.log(`save failed for {userId}: {tostring(saved)}`)

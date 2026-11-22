@@ -263,10 +263,19 @@ local function exclusive(self: Session, body: () -> boolean): boolean
 	return result
 end
 
-function Session.save(self: Session): boolean
+-- `undo`, when given, runs inside the session's lock if the save does not land, before the next
+-- queued save or release can run. A caller that applied a change in memory before saving rolls it
+-- back there, so no other write ever stores a change the caller was told did not save.
+function Session.save(self: Session, undo: (() -> ())?): boolean
+	local function failed(): boolean
+		if undo ~= nil then
+			pcall(undo)
+		end
+		return false
+	end
 	return exclusive(self, function()
 		if self.lost or self.released then
-			return false
+			return failed()
 		end
 		local deps = self.deps
 		local writeData = not self.readOnly
@@ -280,12 +289,12 @@ function Session.save(self: Session): boolean
 			return record, result
 		end)
 		if not ok then
-			return false -- a failed write is not a lost lease: the next autosave tries again
+			return failed() -- a failed write is not a lost lease: the next autosave tries again
 		end
 		if outcome == "lost" then
 			self.lost = true
 			deps.log(`lease lost for {self.key}`)
-			return false
+			return failed()
 		end
 		return true
 	end)
