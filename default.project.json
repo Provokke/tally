@@ -1,0 +1,17 @@
+{
+	"name": "tally",
+	"tree": {
+		"$className": "DataModel",
+		"ReplicatedStorage": {
+			"Tally": { "$path": "src/shared" }
+		},
+		"ServerScriptService": {
+			"Tally": { "$path": "src/server" }
+		},
+		"StarterPlayer": {
+			"StarterPlayerScripts": {
+				"Tally": { "$path": "src/client" }
+			}
+		}
+	}
+}

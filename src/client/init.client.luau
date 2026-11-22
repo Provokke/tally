@@ -1,0 +1,2 @@
+--!strict
+-- Tally client entry. Built in Task 13.
