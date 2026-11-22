@@ -185,9 +185,25 @@ local function syncPlayer(userId: number, result: any?)
 	end)
 end
 
--- A session went live: show it.
+-- Settles the seasons a player has finished and syncs them if any was paid. Never throws.
+local function settlePlayer(userId: number)
+	local ok, paid = pcall(function()
+		return tally:settle(userId)
+	end)
+	if not ok then
+		log(`settle failed for {userId}: {tostring(paid)}`)
+		return
+	end
+	if paid ~= nil and paid > 0 then
+		syncPlayer(userId, nil)
+	end
+end
+
+-- A session went live: show it, then settle what it holds. The settle runs in its own thread, as
+-- it yields, and the join is not held up by it.
 local function onSessionReady(userId: number, _session: any)
 	syncPlayer(userId, nil)
+	task.spawn(settlePlayer, userId)
 end
 
 sessions = Sessions.new({
@@ -309,6 +325,20 @@ task.spawn(function()
 	while true do
 		tally:tick()
 		task.wait(Config.SeasonTickSeconds)
+	end
+end)
+
+-- Settle poll: a season ends while players are in the server, so every player with a writable
+-- session is settled every SettleSeconds, not only at the join.
+task.spawn(function()
+	while true do
+		task.wait(Config.SettleSeconds)
+		for _, player in Players:GetPlayers() do
+			local userId = player.UserId
+			if sessions:writableSession(userId) ~= nil then
+				task.spawn(settlePlayer, userId)
+			end
+		end
 	end
 end)
 

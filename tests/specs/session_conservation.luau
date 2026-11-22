@@ -6,9 +6,11 @@
 -- pure-module specs can't see: a score that is kept in memory and never reaches the record, a
 -- release that doesn't save, a second server that writes over the first.
 local Config = require("../../src/shared/Config")
+local Conservation = require("../fakes/Conservation")
 local Deep = require("../fakes/Deep")
 local FakeGame = require("../fakes/FakeGame")
 local Faults = require("../fakes/Faults")
+local Season = require("../../src/server/Season")
 
 local USERS = { 1, 2 }
 local START = 1000
@@ -65,19 +67,37 @@ end
 local BEST: any = Deep.copy(CONFIG)
 BEST.ScoreMode = "best"
 
--- Restarts a server over the stored records, has every player join, leave and release, and counts
--- from what is stored: no error was thrown, each player's season 1 score is what `expected` says,
--- and every point in the profile's lifetime total is in some season (every point in these cases
--- came through record, so the two agree). In best mode the seasons hold only the highest score, so
--- the caller gives `recorded`: every point it recorded for each player, which lifetime must equal.
--- Returns the restarted server.
+-- The stored records as Conservation reads them: a player's data under profile/<id>, season keys
+-- as they are.
+local function audited(records: any): any
+	local out: any = {}
+	for key, record in records do
+		local id = string.match(key, "^Player_(%d+)$")
+		if id ~= nil then
+			out["profile/" .. id] = record.data
+		else
+			out[key] = record
+		end
+	end
+	return out
+end
+
+-- Restarts a server over the stored records, has every player join (which settles what they are
+-- owed) and leave and release, and counts from what is stored: no error was thrown, each player's
+-- season 1 score is what `expected` says (when it is given), every point in the profile's lifetime
+-- total is in some season (every point in these cases came through record, so the two agree), and
+-- Conservation holds: every Coin is the start plus the season rewards, each paid once from a closed
+-- season. In best mode the seasons hold only the highest score, so the caller gives `recorded`:
+-- every point it recorded for each player, which lifetime must equal. Returns the restarted server.
 local function settledAndCounted(
 	world: any,
-	expected: { [number]: number },
+	expected: { [number]: number }?,
 	recorded: { [number]: number }?,
 	config: any?
 ): any
+	local used: any = config or CONFIG
 	local after = started({ records = world.records, start = RESTART_AT, server = "after-", config = config })
+	after.ordered = world.ordered -- the boards are shared by every server, as the real ones are
 	for _, userId in USERS do
 		after:join(userId)
 	end
@@ -87,14 +107,18 @@ local function settledAndCounted(
 	end
 	after.sched:advance(5)
 	assert(#after.errors == 0, after.errors[1])
+	local startCoins: { [number]: number } = {}
 	for _, userId in USERS do
+		startCoins[userId] = Config.StartingCoins
 		local data = stored(after, userId)
 		assert(data ~= nil, `player {userId} has no stored profile after the restart`)
-		local want = expected[userId] or 0
-		assert(
-			season1(after, userId) == want,
-			`player {userId}: {season1(after, userId)} stored, expected {want}`
-		)
+		if expected ~= nil then
+			local want = expected[userId] or 0
+			assert(
+				season1(after, userId) == want,
+				`player {userId}: {season1(after, userId)} stored, expected {want}`
+			)
+		end
 		local total = 0
 		if recorded ~= nil then
 			total = recorded[userId] or 0
@@ -106,6 +130,13 @@ local function settledAndCounted(
 		assert((data.lifetime.points or 0) == total, `player {userId}: lifetime does not match the seasons`)
 		assert(after.records["Player_" .. userId].lease == nil, "released")
 	end
+	local currentId = Season.idAt(used.Epoch, used.SeasonLengthSeconds, after.clock:now()) :: number
+	local ok, reason = Conservation.check(
+		audited(after.records),
+		startCoins,
+		{ currentId = currentId, mode = if used.ScoreMode == "best" then "best" else "sum" }
+	)
+	assert(ok, reason)
 	return after
 end
 
@@ -114,6 +145,55 @@ local function hookEach(world: any, n: number, hook: (key: string) -> ())
 	for _ = 1, n do
 		world.ds:hookNext(hook)
 	end
+end
+
+-- Runs the next store read (once) as a wait of `seconds`, so a read can be parked mid-call. Every
+-- season read in these cases is a settle's, as nothing else on the server reads through GetAsync.
+local function parkNextRead(world: any, seconds: number)
+	local armed = true
+	world.faults.onRead = function()
+		if armed then
+			armed = false
+			world.sched:wait(seconds)
+		end
+	end
+end
+
+-- Joins, scores, lets the board timer push, leaves and lets the release land.
+local function scoredAndLeft(world: any, userId: number, points: number)
+	world:join(userId)
+	world.sched:advance(1)
+	assert(world:record(userId, points))
+	world.sched:advance(Config.BoardPushSeconds + 1)
+	world:leave(userId)
+	world.sched:advance(5)
+end
+
+-- A server that starts over the same records and boards at `at` (season 11 at 2000), as the one
+-- that pays the seasons the first server saw.
+local function payingWorld(world: any, at: number?): any
+	local paying = started({ records = world.records, start = at or 2000, server = "pay-" })
+	paying.ordered = world.ordered
+	return paying
+end
+
+local function coinsOf(world: any, userId: number): number
+	return stored(world, userId).coins
+end
+
+local PAID_TEXT =
+	"Season 1 is over. You scored 60 points, reached Silver and placed 1st on the podium. 450 Coins paid."
+
+-- The paying server with player 1 joined while their settle is parked on its season read for
+-- `seconds`. Returns the first server and the paying one.
+local function parkedSettle(seconds: number): (any, any)
+	local first = started()
+	scoredAndLeft(first, 1, 60)
+	local paying = payingWorld(first)
+	parkNextRead(paying, seconds)
+	paying:join(1)
+	paying.sched:advance(1)
+	return first, paying
 end
 
 return {
@@ -379,6 +459,261 @@ return {
 			assert(#second.errors == 0, second.errors[1])
 			assert(warned(first, "lost") or player.kicked ~= nil)
 			settledAndCounted(first, {})
+		end,
+	},
+	{
+		name = "payout 1: a season is paid on the player's next join, once, with a notice and a closed season key",
+		run = function()
+			local first = started()
+			scoredAndLeft(first, 1, 60)
+			local paying = payingWorld(first)
+			paying:join(1)
+			paying.sched:advance(5)
+			local data = stored(paying, 1)
+			assert(data.coins == Config.StartingCoins + 450, `coins {data.coins}`)
+			assert(
+				Deep.equal(data.seasons["1"], { score = 60, rewarded = true, tier = "Silver", reward = 450 }),
+				"the season entry"
+			)
+			assert(#data.notices == 1 and data.notices[1].text == PAID_TEXT, data.notices[1].text)
+			local key = paying.records["season/1"]
+			assert(key.state == "closed" and key.closedBy == "pay-", "closed by the paying server")
+			assert(Deep.equal(key.podium, { { userId = 1, score = 60 } }), "the stored podium")
+			local sync = paying:lastSync(1)
+			assert(
+				sync.notices[1] ~= nil and sync.notices[1].text == PAID_TEXT,
+				"the Sync carried the notice"
+			)
+			assert(sync.coins == Config.StartingCoins + 450)
+			assert(#paying.errors == 0, paying.errors[1])
+			paying:leave(1)
+			paying.sched:advance(5)
+			settledAndCounted(paying)
+		end,
+	},
+	{
+		name = "payout 2: joining again pays nothing more",
+		run = function()
+			local first = started()
+			scoredAndLeft(first, 1, 60)
+			local paying = payingWorld(first)
+			paying:join(1)
+			paying.sched:advance(5)
+			for _ = 1, 2 do
+				paying:leave(1)
+				paying.sched:advance(5)
+				paying:join(1)
+				paying.sched:advance(5)
+			end
+			paying.sched:advance(Config.SettleSeconds * 2)
+			local data = stored(paying, 1)
+			assert(data.coins == Config.StartingCoins + 450, `coins {data.coins}`)
+			assert(#data.notices == 1, `{#data.notices} notices`)
+			paying:leave(1)
+			paying.sched:advance(5)
+			settledAndCounted(paying)
+		end,
+	},
+	{
+		name = "payout 3: a player is paid on whichever server they next join, from one close, with agreeing podiums",
+		run = function()
+			local a = started()
+			scoredAndLeft(a, 1, 60)
+			scoredAndLeft(a, 2, 40)
+			a.clock:advance(1000)
+			local b = started({ records = a.records, clock = a.clock, server = "b-" })
+			local c = started({ records = a.records, clock = a.clock, server = "c-" })
+			b.ordered = a.ordered
+			c.ordered = a.ordered
+			b:join(1)
+			c:join(2)
+			FakeGame.step({ b, c }, 5)
+			assert(coinsOf(b, 1) == Config.StartingCoins + 450, `player 1 {coinsOf(b, 1)}`)
+			assert(coinsOf(b, 2) == Config.StartingCoins + 250, `player 2 {coinsOf(b, 2)}`)
+			local key = a.records["season/1"]
+			assert(key.state == "closed" and key.closedBy == "b-", "one close, by the first server")
+			assert(
+				Deep.equal(key.podium, { { userId = 1, score = 60 }, { userId = 2, score = 40 } }),
+				"both were paid from this one podium"
+			)
+			assert(#stored(b, 1).notices == 1 and #stored(b, 2).notices == 1)
+			assert(#b.errors == 0 and #c.errors == 0, b.errors[1] or c.errors[1])
+			b:leave(1)
+			c:leave(2)
+			FakeGame.step({ b, c }, 5)
+			settledAndCounted(b)
+		end,
+	},
+	{
+		-- The mutant save_not_bound_to_profile: the old session's settle must not be allowed to save
+		-- the new session, and so must not look paid.
+		name = "payout 4: a player who leaves and rejoins while their settle is parked is paid once, by the new session",
+		run = function()
+			local _, paying = parkedSettle(50)
+			paying:leave(1)
+			paying.sched:advance(Config.CloseTimeoutSeconds + 3) -- the release gives up waiting and lands
+			assert(paying.records.Player_1.lease == nil, "released")
+			paying:join(1)
+			paying.sched:advance(1)
+			paying.sched:advance(25) -- the parked settle resumes at 2050
+			assert(warned(paying, "payout save failed for 1"), "the old settle's save was refused")
+			local data = stored(paying, 1)
+			assert(data.coins == Config.StartingCoins, "not paid by the old settle")
+			assert(data.seasons["1"].rewarded == false)
+			paying.sched:advance(Config.SettleSeconds + 1)
+			data = stored(paying, 1)
+			assert(data.coins == Config.StartingCoins + 450, `coins {data.coins}`)
+			assert(#data.notices == 1, `{#data.notices} notices`)
+			assert(#paying.errors == 0, paying.errors[1])
+			paying:leave(1)
+			paying.sched:advance(5)
+			settledAndCounted(paying)
+		end,
+	},
+	{
+		-- A stale save must not touch the live session's stored record, and what the new session
+		-- scores must reach the store and survive a crash.
+		name = "payout 4b: a stale settle's save leaves the stored record alone, and the new session's points survive a crash",
+		run = function()
+			local _, paying = parkedSettle(50)
+			paying:leave(1)
+			paying.sched:advance(Config.CloseTimeoutSeconds + 3)
+			paying:join(1)
+			paying.sched:advance(1)
+			assert(paying:record(1, 7), "scored on the new session, in season 11")
+			local before = Deep.copy(paying.records.Player_1)
+			paying.sched:advance(25) -- the parked settle resumes at 2050, before the next autosave
+			assert(warned(paying, "payout save failed for 1"), "the stale save was refused")
+			assert(
+				Deep.equal(paying.records.Player_1, before),
+				"the stale settle wrote nothing to the record"
+			)
+			assert(season1(paying, 1) == 60 and paying.records.Player_1.data.seasons["1"].rewarded == false)
+			paying.sched:advance(Config.AutosaveSeconds + 1)
+			-- The server crashes here: nothing more runs on it, and nothing releases.
+			local data = stored(paying, 1)
+			assert(
+				data.seasons["11"] ~= nil and data.seasons["11"].score == 7,
+				"the 7 points reached the store"
+			)
+			assert(data.lifetime.points == 67, `lifetime {data.lifetime.points}`)
+			assert(data.coins == Config.StartingCoins + 450 and data.seasons["1"].rewarded == true)
+			local after = settledAndCounted(paying)
+			data = stored(after, 1)
+			assert(data.seasons["11"].score == 7 and data.lifetime.points == 67, "after the restart")
+			-- Season 1 paid once (450), and the 7 points in season 11 are paid on the restart (no tier, and
+			-- first place on that board: 300).
+			assert(data.seasons["1"].reward == 450 and data.seasons["11"].reward == 300)
+			assert(data.coins == Config.StartingCoins + 750, `each season paid once: {data.coins}`)
+			assert(#data.notices == 2)
+		end,
+	},
+	{
+		name = "payout 5: a lease stolen while the settle is parked rolls the payout back, kicks the player, and pays once later",
+		run = function()
+			local _, paying = parkedSettle(30)
+			paying.records.Player_1.lease = { owner = "thief", expiresAt = 1e9 }
+			paying.sched:advance(30) -- the parked settle resumes at 2030 and its save finds the lease gone
+			assert(warned(paying, "payout save failed for 1"), "the payout save failed")
+			assert(paying.players[1].kicked ~= nil, "the player was kicked")
+			assert(paying.records.Player_1.lease.owner == "thief", "the thief's lease is untouched")
+			local data = stored(paying, 1)
+			assert(data.coins == Config.StartingCoins and data.seasons["1"].rewarded == false, "nothing paid")
+			assert(#data.notices == 0)
+			paying.records.Player_1.lease = nil
+			local after = settledAndCounted(paying)
+			data = stored(after, 1)
+			assert(data.coins == Config.StartingCoins + 450 and #data.notices == 1, `coins {data.coins}`)
+		end,
+	},
+	{
+		name = "payout 6: a player who leaves while the settle is parked is not paid there, and is paid once on the next server",
+		run = function()
+			local _, paying = parkedSettle(60)
+			paying:leave(1)
+			paying.sched:advance(Config.CloseTimeoutSeconds + 3)
+			assert(paying.records.Player_1.lease == nil, "released")
+			assert(coinsOf(paying, 1) == Config.StartingCoins and not warned(paying, "payout save failed"))
+			paying.sched:advance(40) -- the parked settle resumes at 2060
+			assert(warned(paying, "payout save failed for 1"), "its save was refused: the session is gone")
+			local data = stored(paying, 1)
+			assert(data.coins == Config.StartingCoins and data.seasons["1"].rewarded == false, "nothing paid")
+			assert(#paying.errors == 0, paying.errors[1])
+			local after = settledAndCounted(paying)
+			data = stored(after, 1)
+			assert(data.coins == Config.StartingCoins + 450 and #data.notices == 1, `coins {data.coins}`)
+		end,
+	},
+	{
+		name = "payout 7: shutdown returns while a payout save hangs, and a restarted server pays at most once",
+		run = function()
+			local _, paying = parkedSettle(20)
+			hookEach(paying, 20, function(key: string)
+				if key == "Player_1" then
+					paying.sched:wait(math.huge)
+				end
+			end)
+			paying.sched:advance(25) -- the settle resumes, closes the season, and its save hangs
+			assert(paying.records["season/1"].state == "closed", "the settle reached its save")
+			assert(coinsOf(paying, 1) == Config.StartingCoins, "the save never landed")
+			local closed = false
+			paying.sched:spawn(function()
+				paying.onClose()
+				closed = true
+			end)
+			paying.sched:advance(Config.CloseTimeoutSeconds + 5)
+			assert(closed, "onClose returned within the timeout")
+			local after = settledAndCounted(paying)
+			local data = stored(after, 1)
+			assert(data.coins == Config.StartingCoins + 450 and #data.notices == 1, `coins {data.coins}`)
+		end,
+	},
+	{
+		name = "payout 8: a payout is one save of the profile, and the close is one write of the season key",
+		run = function()
+			local _, paying = parkedSettle(20)
+			paying.ds.events = {}
+			paying.sched:advance(25) -- the settle resumes: close, pay
+			local profile, season = 0, 0
+			for _, event in paying.ds.events do
+				if event == "call Player_1" then
+					profile += 1
+				elseif event == "call season/1" then
+					season += 1
+				end
+			end
+			assert(profile == 1, `{profile} saves of the profile`)
+			assert(season == 1, `{season} writes of season/1: the close (the first server opened it)`)
+			assert(coinsOf(paying, 1) == Config.StartingCoins + 450)
+			paying:leave(1)
+			paying.sched:advance(5)
+			settledAndCounted(paying)
+		end,
+	},
+	{
+		name = "payout 9: the podium bonus comes from the stored close, not the live board",
+		run = function()
+			local first = started()
+			scoredAndLeft(first, 1, 60)
+			scoredAndLeft(first, 2, 40)
+			local paying = payingWorld(first)
+			paying:join(1) -- this closes season 1 with podium 1 then 2
+			paying.sched:advance(5)
+			assert(
+				Deep.equal(
+					paying.records["season/1"].podium,
+					{ { userId = 1, score = 60 }, { userId = 2, score = 40 } }
+				)
+			)
+			paying.orderedStore("tally-1"):write("3", 5000) -- a new leader on the live board
+			paying:join(2)
+			paying.sched:advance(5)
+			assert(coinsOf(paying, 2) == Config.StartingCoins + 250, `player 2 {coinsOf(paying, 2)}`)
+			assert(string.find(stored(paying, 2).notices[1].text, "placed 2nd on the podium", 1, true))
+			paying:leave(1)
+			paying:leave(2)
+			paying.sched:advance(5)
+			settledAndCounted(paying)
 		end,
 	},
 }
