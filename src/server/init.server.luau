@@ -46,12 +46,26 @@ local playerStore: any
 local seasonStore: any
 local ordered: (seasonId: number) -> any
 if useRealStore then
-	playerStore = DataStoreService:GetDataStore(Config.DataStoreName)
-	seasonStore = DataStoreService:GetDataStore(Config.SeasonStoreName)
-	ordered = function(seasonId: number): any
-		return DataStoreService:GetOrderedDataStore(Config.BoardStorePrefix .. seasonId)
+	local acquired, problem = pcall(function()
+		playerStore = DataStoreService:GetDataStore(Config.DataStoreName)
+		seasonStore = DataStoreService:GetDataStore(Config.SeasonStoreName)
+		ordered = function(seasonId: number): any
+			return DataStoreService:GetOrderedDataStore(Config.BoardStorePrefix .. seasonId)
+		end
+	end)
+	if not acquired then
+		-- In Studio an unpublished place has no real stores: carry on in memory rather than stop. A
+		-- live server never falls back, as it would run without saving.
+		if not RunService:IsStudio() then
+			error(problem, 0)
+		end
+		warn(
+			"Tally: the real data stores aren't available (publish the place, or turn off TallyUseDataStore); using in-memory stores, nothing will be saved"
+		)
+		useRealStore = false
 	end
-else
+end
+if not useRealStore then
 	playerStore = MemoryStore.new()
 	seasonStore = MemoryStore.new()
 	local boards: { [number]: any } = {}

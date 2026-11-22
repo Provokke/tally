@@ -21,7 +21,7 @@ CONFIG.SeasonLengthSeconds = 100
 
 local function started(options: any?): any
 	local opts: any = table.clone(options or {})
-	opts.config = CONFIG
+	opts.config = opts.config or CONFIG
 	opts.start = opts.start or START
 	local world = FakeGame.new(opts)
 	world:start()
@@ -60,12 +60,24 @@ local function season1(world: any, userId: number): number
 	return data.seasons["1"].score
 end
 
+-- The same config in best mode: the season keeps the highest single score, while lifetime still
+-- counts every point recorded.
+local BEST: any = Deep.copy(CONFIG)
+BEST.ScoreMode = "best"
+
 -- Restarts a server over the stored records, has every player join, leave and release, and counts
 -- from what is stored: no error was thrown, each player's season 1 score is what `expected` says,
 -- and every point in the profile's lifetime total is in some season (every point in these cases
--- came through record, so the two agree). Returns the restarted server.
-local function settledAndCounted(world: any, expected: { [number]: number }): any
-	local after = started({ records = world.records, start = RESTART_AT, server = "after-" })
+-- came through record, so the two agree). In best mode the seasons hold only the highest score, so
+-- the caller gives `recorded`: every point it recorded for each player, which lifetime must equal.
+-- Returns the restarted server.
+local function settledAndCounted(
+	world: any,
+	expected: { [number]: number },
+	recorded: { [number]: number }?,
+	config: any?
+): any
+	local after = started({ records = world.records, start = RESTART_AT, server = "after-", config = config })
 	for _, userId in USERS do
 		after:join(userId)
 	end
@@ -84,8 +96,12 @@ local function settledAndCounted(world: any, expected: { [number]: number }): an
 			`player {userId}: {season1(after, userId)} stored, expected {want}`
 		)
 		local total = 0
-		for _, entry in data.seasons do
-			total += entry.score
+		if recorded ~= nil then
+			total = recorded[userId] or 0
+		else
+			for _, entry in data.seasons do
+				total += entry.score
+			end
 		end
 		assert((data.lifetime.points or 0) == total, `player {userId}: lifetime does not match the seasons`)
 		assert(after.records["Player_" .. userId].lease == nil, "released")
@@ -280,6 +296,58 @@ return {
 			assert(season1(world, 1) == 17, "and stored")
 			assert(#world.errors == 0, world.errors[1])
 			settledAndCounted(world, { [1] = 17 })
+		end,
+	},
+	{
+		name = "best mode keeps the highest single score in the season and every point in the lifetime total",
+		run = function()
+			local world = started({ config = BEST })
+			world:join(1)
+			world.sched:advance(1)
+			for _, points in { 10, 30, 20 } do
+				assert(world:record(1, points))
+			end
+			world:leave(1)
+			world.sched:advance(2)
+			local data = stored(world, 1)
+			assert(data.seasons["1"].score == 30, `season score {data.seasons["1"].score}, the highest`)
+			assert(data.lifetime.points == 60, `lifetime {data.lifetime.points}, every submission`)
+			assert(#world.errors == 0, world.errors[1])
+			settledAndCounted(world, { [1] = 30 }, { [1] = 60 }, BEST)
+		end,
+	},
+	{
+		-- A record saved by a newer version of the game opens read-only: shown, never changed. Scoring
+		-- goes through writableSession, so it is refused; reading through `get` would take the score.
+		name = "a read-only session is refused a score and its stored record is unchanged after a restart",
+		run = function()
+			local world = started()
+			local newer: any = {
+				schema = Config.SchemaVersion + 1,
+				savedAt = 0,
+				data = {
+					coins = 5,
+					lifetime = { points = 7 },
+					seasons = { ["1"] = { score = 7, rewarded = false } },
+					streak = { day = 0, count = 0, earned = 0 },
+					notices = {},
+				},
+			}
+			world.records.Player_1 = Deep.copy(newer)
+			world:join(1)
+			world.sched:advance(1)
+			assert(world:lastSync(1) ~= nil, "the read-only session is still shown")
+			local ok, why = world:record(1, 10)
+			assert(not ok and why == "no_profile", tostring(why))
+			world.sched:advance(Config.AutosaveSeconds + 1)
+			world:leave(1)
+			world.sched:advance(2)
+			local record = world.records.Player_1
+			assert(record.schema == newer.schema, "still the newer schema")
+			assert(Deep.equal(record.data, newer.data), "the data is exactly as it was")
+			assert(#world.errors == 0, world.errors[1])
+			local after = started({ records = world.records, start = RESTART_AT, server = "after-" })
+			assert(Deep.equal(after.records.Player_1.data, newer.data), "and after a restart")
 		end,
 	},
 	{

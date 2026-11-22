@@ -94,6 +94,7 @@ return {
 			assert(world.ds.calls == 0, "no real data store was touched")
 			assert(world.ordered["tally-1"] == nil, "and no real ordered store was made")
 			assert(warned(world, "Studio") == false, "it printed, it did not warn")
+			assert(not warned(world, "real data stores"), "and it did not fall back: it never asked for them")
 			world:join(1)
 			world.sched:advance(1)
 			assert(world:lastSync(1) ~= nil, "joined")
@@ -129,21 +130,41 @@ return {
 		end,
 	},
 	{
-		name = "Studio with TallyUseDataStore on an unpublished place fails on its first store call, logged not thrown",
+		name = "Studio with TallyUseDataStore on an unpublished place warns once and falls back to in-memory stores",
 		run = function()
-			local world = FakeGame.new({
+			local world = started({
 				studio = true,
 				unpublished = true,
 				attributes = { TallyUseDataStore = true },
+				start = Config.Epoch + 10,
 			})
+			local warnings = 0
+			for _, line in world.warnings do
+				if string.find(line, "real data stores aren't available", 1, true) then
+					warnings += 1
+				end
+			end
+			assert(warnings == 1, `{warnings} warnings`)
+			assert(warned(world, "nothing will be saved"), "in plain words")
+			assert(world:remote("Request") ~= nil and world:remote("TallyRecord") ~= nil, "it started")
+			assert(world.onClose ~= nil, "BindToClose is registered")
+			world:join(1)
+			world.sched:advance(1)
+			assert(world:lastSync(1) ~= nil, "a player joins")
+			assert(world:record(1, 30), "and scores")
+			world.sched:advance(Config.BoardPushSeconds + 1)
+			assert(world.ds.calls == 0 and world.ordered["tally-1"] == nil, "no real store was used")
+			assert(world.memoryBoards[1]:GetAsync("1") == 30, "the in-memory board holds the score")
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
+		name = "a live server whose real stores are not available stops rather than run unsaved",
+		run = function()
+			local world = FakeGame.new({ unpublished = true })
 			world:start()
-			assert(world.started == false, "the script stopped")
-			assert(
-				world.startError ~= nil
-					and string.find(world.startError, "You must publish this place", 1, true),
-				tostring(world.startError)
-			)
-			assert(world:remote("TallyRecord") == nil, "nothing was made")
+			assert(world.started == false and world.startError ~= nil)
+			assert(string.find(world.startError, "You must publish this place", 1, true), world.startError)
 		end,
 	},
 }
