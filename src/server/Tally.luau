@@ -261,4 +261,61 @@ function Tally.settle(self: Tally, userId: number): number
 	return paid
 end
 
+local STREAK_FIELDS = { "day", "count", "earned" }
+
+-- One in-memory change (the new streak, the Coins, the notice), then one save bound to this
+-- profile. A save that fails rolls the change back relative to the current values: the Coins are
+-- subtracted, and a streak field is put back only if it still holds what this claim set, so a
+-- Coin or a field changed while the save was in flight is kept.
+local function claim(self: Tally, userId: number): (boolean, string?, number?)
+	local deps = self.deps
+	local profile = deps.profiles.get(userId)
+	if profile == nil then
+		return false, "no_profile", nil
+	end
+	local now = deps.now()
+	local claimed, why = deps.Streak.claim(profile.streak, deps.Streak.dayOf(now), deps.config.StreakRewards)
+	if claimed == nil then
+		return false, why, nil
+	end
+	local before = profile.streak
+	local applied = table.clone(claimed.streak)
+	profile.streak = claimed.streak
+	profile.coins += claimed.reward
+	local added = deps.Notices.add(
+		profile,
+		`Streak day {claimed.streak.count}: {claimed.reward} Coins claimed.`,
+		now,
+		deps.config.NoticeCap
+	)
+	if not deps.profiles.save(userId, profile) then
+		for _, field in STREAK_FIELDS do
+			if before[field] ~= applied[field] and profile.streak[field] == applied[field] then
+				profile.streak[field] = before[field]
+			end
+		end
+		profile.coins -= claimed.reward
+		deps.Notices.remove(profile, added)
+		deps.log(`streak save failed for {userId}`)
+		return false, "save_failed", nil
+	end
+	return true, nil, claimed.reward
+end
+
+-- Claims the player's daily streak: the Coins, the new streak and a notice land in one save.
+-- (true, nil, reward) on success, else (false, reason).
+function Tally.claimStreak(self: Tally, userId: number): (boolean, string?, number?)
+	if self.calling[userId] then
+		return false, "busy", nil
+	end
+	self.calling[userId] = true
+	local ok, done, why, reward = pcall(claim, self, userId)
+	self.calling[userId] = nil
+	if not ok then
+		self.deps.log(`streak claim failed for {userId}: {tostring(done)}`)
+		return false, "error", nil
+	end
+	return done, why, reward
+end
+
 return Tally

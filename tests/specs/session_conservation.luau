@@ -15,6 +15,10 @@ local Season = require("../../src/server/Season")
 local USERS = { 1, 2 }
 local START = 1000
 local RESTART_AT = 50000 -- after every lease (180 s) has run out
+-- A streak claim is refused on UTC day 0 (the first 86400 seconds), so the claim cases start on day 1
+-- and restart on day 11.
+local CLAIM_START = 100000
+local CLAIM_RESTART = 1000000
 
 -- Season 1 is [1000, 1100): short enough that a restart lands in a much later season.
 local CONFIG: any = Deep.copy(Config)
@@ -93,10 +97,16 @@ local function settledAndCounted(
 	world: any,
 	expected: { [number]: number }?,
 	recorded: { [number]: number }?,
-	config: any?
+	config: any?,
+	restartAt: number?
 ): any
 	local used: any = config or CONFIG
-	local after = started({ records = world.records, start = RESTART_AT, server = "after-", config = config })
+	local after = started({
+		records = world.records,
+		start = restartAt or RESTART_AT,
+		server = "after-",
+		config = config,
+	})
 	after.ordered = world.ordered -- the boards are shared by every server, as the real ones are
 	for _, userId in USERS do
 		after:join(userId)
@@ -147,8 +157,9 @@ local function hookEach(world: any, n: number, hook: (key: string) -> ())
 	end
 end
 
--- Runs the next store read (once) as a wait of `seconds`, so a read can be parked mid-call. Every
--- season read in these cases is a settle's, as nothing else on the server reads through GetAsync.
+-- Runs the next store read (once) as a wait of `seconds`, so a read can be parked mid-call. These
+-- cases aim it at a settle's season read: a joining player's settle starts before their first Sync,
+-- so it is the first to read (the Sync's board read is an ordered-store read, and comes after).
 local function parkNextRead(world: any, seconds: number)
 	local armed = true
 	world.faults.onRead = function()
@@ -479,12 +490,16 @@ return {
 			local key = paying.records["season/1"]
 			assert(key.state == "closed" and key.closedBy == "pay-", "closed by the paying server")
 			assert(Deep.equal(key.podium, { { userId = 1, score = 60 } }), "the stored podium")
-			local sync = paying:lastSync(1)
-			assert(
-				sync.notices[1] ~= nil and sync.notices[1].text == PAID_TEXT,
-				"the Sync carried the notice"
-			)
-			assert(sync.coins == Config.StartingCoins + 450)
+			local carried = 0
+			for _, sent in paying.synced do
+				for _, notice in sent.payload.notices do
+					if notice.text == PAID_TEXT then
+						carried += 1
+					end
+				end
+			end
+			assert(carried == 1, `the notice reached the player in {carried} Syncs`)
+			assert(paying:lastSync(1).coins == Config.StartingCoins + 450)
 			assert(#paying.errors == 0, paying.errors[1])
 			paying:leave(1)
 			paying.sched:advance(5)
@@ -714,6 +729,173 @@ return {
 			paying:leave(2)
 			paying.sched:advance(5)
 			settledAndCounted(paying)
+		end,
+	},
+	{
+		name = "streak 1: a claim_streak request pays 10 in one write, and the autosave shows the streak and the notice",
+		run = function()
+			local world = started({ start = CLAIM_START })
+			world:join(1)
+			world.sched:advance(2)
+			assert(world:lastSync(1).streak.canClaim == true)
+			local writes = world.faults.writes
+			world:request(1, "claim_streak")
+			assert(world.faults.writes - writes == 1, `{world.faults.writes - writes} writes for one claim`)
+			local sync = world:lastSync(1)
+			assert(Deep.equal(sync.result, { action = "claim_streak", ok = true, reward = 10 }))
+			assert(sync.coins == Config.StartingCoins + 10 and sync.streak.canClaim == false)
+			assert(#sync.notices == 1 and sync.notices[1].text == "Streak day 1: 10 Coins claimed.")
+			world.sched:advance(Config.AutosaveSeconds + 1)
+			local data = stored(world, 1)
+			assert(
+				data.streak.count == 1 and data.streak.earned == 10 and data.streak.day == 1,
+				"streak stored"
+			)
+			assert(data.coins == Config.StartingCoins + 10 and #data.notices == 1)
+			-- The same request the same day is refused and changes nothing.
+			world.sched:advance(1)
+			writes = world.faults.writes
+			world:request(1, "claim_streak")
+			assert(
+				world:lastSync(1).result.reason == "already_claimed" and world:lastSync(1).result.ok == false
+			)
+			assert(world.faults.writes == writes, "a refused claim writes nothing")
+			assert(world:lastSync(1).coins == Config.StartingCoins + 10)
+			assert(#world.errors == 0, world.errors[1])
+			world:leave(1)
+			world.sched:advance(5)
+			settledAndCounted(world, nil, nil, nil, CLAIM_RESTART)
+		end,
+	},
+	{
+		name = "streak 2: a claim on the next UTC day, inside the lease, continues the streak",
+		run = function()
+			local world = started({ start = CLAIM_START })
+			world:join(1)
+			world.sched:advance(2)
+			world:request(1, "claim_streak")
+			assert(world:lastSync(1).result.reward == 10)
+			world.sched:advance(86400) -- the autosave renews the lease every minute
+			assert(world.records.Player_1.lease ~= nil and not world.players[1].kicked, "still the owner")
+			world:request(1, "claim_streak")
+			local sync = world:lastSync(1)
+			assert(
+				Deep.equal(sync.result, { action = "claim_streak", ok = true, reward = 15 }),
+				tostring(sync.result.reason)
+			)
+			assert(sync.streak.count == 2 and sync.coins == Config.StartingCoins + 25)
+			world.sched:advance(Config.AutosaveSeconds + 1)
+			local data = stored(world, 1)
+			assert(data.streak.count == 2 and data.streak.earned == 25 and data.streak.day == 2)
+			assert(#world.errors == 0, world.errors[1])
+			world:leave(1)
+			world.sched:advance(5)
+			settledAndCounted(world, nil, nil, nil, CLAIM_RESTART)
+		end,
+	},
+	{
+		name = "streak 3: a crash after a claim finds the Coins, the streak and the notice together or not at all",
+		run = function()
+			local world = started({ start = CLAIM_START })
+			world:join(1)
+			world.sched:advance(2)
+			-- The claim's own write is write 1; a second write would be a second save for the same claim.
+			world.faults:arm(2, "stop")
+			world:request(1, "claim_streak")
+			local data = stored(world, 1)
+			assert(world.faults.dead == false, "a claim needs only one write")
+			assert(data.coins == Config.StartingCoins + 10, `Coins {data.coins}`)
+			assert(data.streak.count == 1 and data.streak.earned == 10, "the streak is in the same write")
+			assert(#data.notices == 1, "so is the notice")
+			-- A crash on the claim's own write leaves none of the three.
+			local other = started({ start = CLAIM_START, server = "other-" })
+			other:join(2)
+			other.sched:advance(2)
+			other.faults:arm(1, "stop")
+			other:request(2, "claim_streak")
+			local before = stored(other, 2)
+			assert(before.coins == Config.StartingCoins and before.streak.count == 0 and #before.notices == 0)
+			assert(other.faults.dead == true)
+		end,
+	},
+	{
+		name = "sync 1: a Sync carries the server clock, season, score, rank, board, streak and notices, and a player with no score has no rank",
+		run = function()
+			local world = started({ start = CLAIM_START })
+			world:join(1)
+			world:join(2)
+			world.sched:advance(1)
+			assert(world:record(1, 30))
+			world.sched:advance(Config.BoardPushSeconds + 1)
+			world:request(1, "board_page", 1)
+			world:request(2, "board_page", 1)
+			local mine = world:lastSync(1)
+			assert(type(mine.coins) == "number" and mine.coins == Config.StartingCoins)
+			assert(mine.serverNow == math.floor(world.clock:now()), `serverNow {mine.serverNow}`)
+			assert(mine.season.id == 991 and mine.season.endsAt == 100100 and mine.season.state == "open")
+			assert(mine.score == 30 and mine.rank == 1, `score {mine.score} rank {tostring(mine.rank)}`)
+			assert(mine.board.page == 1 and #mine.board.entries == 1)
+			assert(mine.board.entries[1].userId == 1 and mine.board.entries[1].score == 30)
+			assert(Deep.equal(mine.streak, { count = 0, canClaim = true, broken = false, nextReward = 10 }))
+			assert(type(mine.notices) == "table" and #mine.notices == 0)
+			assert(mine.result == nil or mine.result.action == "board_page")
+			local theirs = world:lastSync(2)
+			assert(theirs.score == 0 and theirs.rank == nil, "no score, no rank")
+			assert(theirs.board.entries[1].userId == 1, "the cached board is the same for both")
+			world:request(1, "board_page", 4)
+			assert(world:lastSync(1).board.page == 4, "the page asked for comes back")
+			assert(#world.errors == 0, world.errors[1])
+			world:leave(1)
+			world:leave(2)
+			world.sched:advance(5)
+			settledAndCounted(world, nil, nil, nil, CLAIM_RESTART)
+		end,
+	},
+	{
+		name = "sync 2: a joining player's first Sync arrives before their settle completes",
+		run = function()
+			local _, paying = parkedSettle(50)
+			local sync = paying:lastSync(1)
+			assert(sync ~= nil, "synced while the settle is parked on its season read")
+			assert(sync.coins == Config.StartingCoins, "the settle has not paid yet")
+			assert(coinsOf(paying, 1) == Config.StartingCoins and not warned(paying, "payout save failed"))
+			paying.sched:advance(60)
+			assert(coinsOf(paying, 1) == Config.StartingCoins + 450, "then it pays")
+			assert(paying:lastSync(1).coins == Config.StartingCoins + 450)
+			assert(#paying.errors == 0, paying.errors[1])
+			paying:leave(1)
+			paying.sched:advance(5)
+			settledAndCounted(paying)
+		end,
+	},
+	{
+		name = "streak 4: a read-only session's claim_streak and board_page requests are dropped, with no answer and no change",
+		run = function()
+			local world = started({ start = CLAIM_START })
+			local newer: any = {
+				schema = Config.SchemaVersion + 1,
+				savedAt = 0,
+				data = {
+					coins = 5,
+					lifetime = {},
+					seasons = {},
+					streak = { day = 0, count = 0, earned = 0 },
+					notices = {},
+				},
+			}
+			world.records.Player_1 = Deep.copy(newer)
+			world:join(1)
+			world.sched:advance(1)
+			assert(world:lastSync(1) ~= nil, "the read-only session is shown")
+			local syncs = #world.synced
+			local writes = world.faults.writes
+			world:request(1, "claim_streak")
+			world.sched:advance(1)
+			world:request(1, "board_page", 2)
+			assert(#world.synced == syncs, "a call from a session that would not be saved gets no answer")
+			assert(world.faults.writes == writes, "and writes nothing")
+			assert(Deep.equal(world.records.Player_1.data, newer.data))
+			assert(#world.errors == 0, world.errors[1])
 		end,
 	},
 }

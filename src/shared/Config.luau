@@ -37,5 +37,13 @@ return table.freeze({
 	Limits = table.freeze({
 		BurstPerPlayer = 6, -- remote calls a player can make in a burst
 		RefillPerSecond = 2, -- calls handed back to each player per second
+		-- A call that touches the DataStore (a streak claim saves the profile) draws from a second,
+		-- slower allowance, so a loop of cheap-looking calls cannot use up the server's write budget.
+		-- Roblox gives a server about 60 + 10 x players writes a minute, and autosaves use one per
+		-- player, so six operations back a minute is two claim attempts sustained.
+		StoreBurstPerPlayer = 6, -- store operations a player can spend in a burst
+		StoreOpsPerMinute = 6, -- store operations handed back to each player per minute
+		-- What each call spends. A claim is one save, costed at three to leave room for a retried write.
+		StoreCost = table.freeze({ claim_streak = 3 }),
 	}),
 })

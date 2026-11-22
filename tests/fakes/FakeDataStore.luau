@@ -27,7 +27,7 @@ export type FakeDataStore = typeof(setmetatable(
 		commitMessage: string,
 		reruns: number,
 		hooks: { (key: string) -> () },
-		events: { string }?, -- when set, "call <key>" is appended at the start of each call
+		events: { string }?, -- when set, "call <key>" is appended at the start of each UpdateAsync, "get <key>" at the start of each GetAsync
 	},
 	FakeDataStore
 ))
@@ -203,6 +203,9 @@ function FakeDataStore.handle(self: FakeDataStore, faults: Faults.Faults, option
 		return result
 	end
 	function handle.GetAsync(_: any, key: string, getOptions: any?): any
+		if self.events then
+			table.insert(self.events, "get " .. key)
+		end
 		faults:beforeRead()
 		if cacheSeconds ~= nil and not (getOptions ~= nil and getOptions.UseCache == false) then
 			local hit = cache[key]

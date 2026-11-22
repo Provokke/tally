@@ -119,7 +119,9 @@ return {
 	{
 		name = "every reason the server gives has plain words, and an unknown one still has some",
 		run = function()
-			for _, reason in { "already_claimed", "save_failed", "busy", "no_profile", "bad_day" } do
+			for _, reason in
+				{ "already_claimed", "save_failed", "busy", "slow_down", "no_profile", "bad_day" }
+			do
 				local text = BoardLogic.reasonText(reason)
 				assert(text ~= "" and text ~= "That didn't work.", reason)
 			end

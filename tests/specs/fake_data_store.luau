@@ -154,4 +154,22 @@ return {
 			assert(ds.records.k.keep == true and ds.records.k.coins == nil, "refused writes leave the record")
 		end,
 	},
+	{
+		name = "with events set, a GetAsync and an UpdateAsync on one key leave get then call",
+		run = function()
+			local ds = FakeDataStore.new({ k = { n = 1 } })
+			ds.events = {}
+			local h = ds:handle(Faults.new())
+			assert(h:GetAsync("k").n == 1)
+			h:UpdateAsync("k", function(stored: any)
+				return stored
+			end)
+			assert(
+				#ds.events == 2 and ds.events[1] == "get k" and ds.events[2] == "call k",
+				table.concat(ds.events, ",")
+			)
+			ds.events = nil
+			h:GetAsync("k") -- control: no events table, nothing recorded and nothing thrown
+		end,
+	},
 }

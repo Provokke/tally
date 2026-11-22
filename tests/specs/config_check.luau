@@ -335,6 +335,43 @@ return {
 		end,
 	},
 	{
+		name = "the store limits must be whole numbers and the claim costed",
+		run = function()
+			for _, field in { "StoreBurstPerPlayer", "StoreOpsPerMinute" } do
+				flagged(function(c)
+					c.Limits[field] = 0
+				end, field)
+				flagged(function(c)
+					c.Limits[field] = 2.5
+				end, field)
+				flagged(function(c)
+					c.Limits[field] = nil
+				end, field)
+			end
+			flagged(function(c)
+				c.Limits.StoreCost = nil
+			end, "StoreCost")
+			flagged(function(c)
+				c.Limits.StoreCost = 5
+			end, "StoreCost")
+			flagged(function(c)
+				c.Limits.StoreCost.claim_streak = nil
+			end, "StoreCost.claim_streak")
+			flagged(function(c)
+				c.Limits.StoreCost.claim_streak = 0
+			end, "StoreCost.claim_streak")
+			flagged(function(c)
+				c.Limits.StoreCost.claim_streak = 1.5
+			end, "StoreCost.claim_streak")
+			flagged(function(c)
+				c.Limits.StoreCost.claim_streak = c.Limits.StoreBurstPerPlayer + 1
+			end, "StoreCost.claim_streak")
+			local config = Deep.copy(Config)
+			config.Limits.StoreCost.claim_streak = config.Limits.StoreBurstPerPlayer
+			assert(ConfigCheck.check(config), "a cost equal to the burst is allowed")
+		end,
+	},
+	{
 		name = "a config that is not a table returns false rather than throwing",
 		run = function()
 			local ok, reason = ConfigCheck.check(nil)

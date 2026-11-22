@@ -155,6 +155,7 @@ local REASONS: { [string]: string } = {
 	already_claimed = "You have already claimed today. The day changes at midnight UTC.",
 	save_failed = "Couldn't save that. Try again.",
 	busy = "Hold on, still working on your last request.",
+	slow_down = "Too many claims. Wait a moment and try again.",
 	no_profile = "Your data isn't loaded yet.",
 	bad_day = "The server's day looks wrong. Try again in a moment.",
 }

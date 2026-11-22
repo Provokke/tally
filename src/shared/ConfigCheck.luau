@@ -177,6 +177,21 @@ function ConfigCheck.check(config: any): (boolean, string?)
 			return false, `Limits.{field} must be above 0`
 		end
 	end
+	for _, field in { "StoreBurstPerPlayer", "StoreOpsPerMinute" } do
+		if not isWhole(limits[field], 1) then
+			return false, `Limits.{field} must be a whole number of 1 or more`
+		end
+	end
+	local cost = limits.StoreCost
+	if type(cost) ~= "table" then
+		return false, "Limits.StoreCost must be a table"
+	end
+	if not isWhole(cost.claim_streak, 1) then
+		return false, "Limits.StoreCost.claim_streak must be a whole number of 1 or more"
+	end
+	if cost.claim_streak > limits.StoreBurstPerPlayer then
+		return false, "Limits.StoreCost.claim_streak must not exceed StoreBurstPerPlayer"
+	end
 	return true, nil
 end
 

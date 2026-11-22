@@ -35,9 +35,9 @@ local DATA: { [string]: any } = {
 	Store = require("../../src/server/Data/Store"),
 }
 
--- A module is added here when its task creates it: Handlers (Task 11) and DemoSeed (Task 15) are
--- not here yet.
+-- A module is added here when its task creates it: DemoSeed (Task 15) is not here yet.
 local SERVER: { [string]: any } = {
+	Handlers = require("../../src/server/Handlers"),
 	Leaderboard = require("../../src/server/Leaderboard"),
 	Notices = require("../../src/server/Notices"),
 	Payout = require("../../src/server/Payout"),

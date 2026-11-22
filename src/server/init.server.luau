@@ -10,8 +10,12 @@ local ServerStorage = game:GetService("ServerStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Tally")
 local Config = require(Shared:WaitForChild("Config"))
+local BoardLogic = require(Shared:WaitForChild("BoardLogic"))
 local ConfigCheck = require(Shared:WaitForChild("ConfigCheck"))
+local RateLimiter = require(Shared:WaitForChild("RateLimiter"))
+local Validate = require(Shared:WaitForChild("Validate"))
 
+local Handlers = require(script.Handlers)
 local Lease = require(script.Data.Lease)
 local Leaderboard = require(script.Leaderboard)
 local MemoryOrderedStore = require(script.Data.MemoryOrderedStore)
@@ -132,6 +136,12 @@ sync.Parent = Shared
 
 local sessions: any
 local tally: any
+local handlers: any
+local leaderboard: any
+
+-- The board page each player is looking at. The client asks for a page with board_page and the
+-- next Sync carries it. Cleared when the player leaves.
+local pages: { [number]: number } = {}
 
 -- The last notice each player was sent, so a Sync carries only what is new. Notices are tables
 -- in the profile and the oldest are dropped from the front, so the last one sent is found by
@@ -157,26 +167,39 @@ local function newNotices(userId: number, notices: { any }): { any }
 	return out
 end
 
--- What one player sees: their Coins, the current season and their score in it, and the notices
--- since the last Sync, plus the answer to the call that caused it. Sent on join.
+-- What one player sees: their Coins, the current season and their score and rank in it, the cached
+-- top of the board and their streak, the notices since the last Sync, and the answer to the call
+-- that caused it. Sent on join and after every call. A player with no session or no current
+-- season is not synced. The board comes from the per-server cache, so the number of Syncs never
+-- sets the number of ordered reads.
 local function syncPlayer(userId: number, result: any?)
 	local player = Players:GetPlayerByUserId(userId)
 	local session = sessions:get(userId)
-	if player == nil or session == nil then
+	local id = tally:currentId()
+	if player == nil or session == nil or id == nil then
 		return
 	end
 	local data = session.data
-	local id = tally:currentId()
-	local seasonView: any = nil
-	local score = 0
-	if id ~= nil then
-		seasonView = { id = id, endsAt = tally:view(id).endsAt }
-		score = Scores.score(data, id)
+	local now = os.time()
+	local view = tally:view(id)
+	local score = Scores.score(data, id)
+	local top = leaderboard:top(id)
+	local entries = {}
+	for _, entry in top do
+		table.insert(entries, { userId = entry.userId, score = entry.score })
 	end
 	local payload: { [string]: any } = {
 		coins = data.coins,
-		season = seasonView,
+		serverNow = now,
+		season = {
+			id = id,
+			endsAt = view.endsAt,
+			state = if view.state == "closed" then "closed" else "open",
+		},
 		score = score,
+		rank = BoardLogic.estimateRank(entries, Config.BoardCacheSize, score),
+		board = { page = pages[userId] or 1, entries = entries },
+		streak = Streak.state(data.streak, Streak.dayOf(now), Config.StreakRewards),
 		notices = newNotices(userId, data.notices),
 		result = result,
 	}
@@ -199,11 +222,13 @@ local function settlePlayer(userId: number)
 	end
 end
 
--- A session went live: show it, then settle what it holds. The settle runs in its own thread, as
--- it yields, and the join is not held up by it.
+-- A session went live: settle what it holds and show it, each in its own thread, as both yield (the
+-- settle on the stores, the Sync on the board's cached read) and the join is not held up by either.
+-- The settle starts first and the Sync does not wait for it, so the player sees their state before
+-- a slow settle finishes.
 local function onSessionReady(userId: number, _session: any)
-	syncPlayer(userId, nil)
 	task.spawn(settlePlayer, userId)
+	task.spawn(syncPlayer, userId, nil)
 end
 
 sessions = Sessions.new({
@@ -232,19 +257,21 @@ sessions = Sessions.new({
 	log = log,
 	-- A release on leave or shutdown waits for a score, settle or streak call that is still running.
 	inUse = function(userId: number): boolean
-		return tally ~= nil and tally:busy(userId)
+		return handlers ~= nil and handlers:busy(userId)
 	end,
+})
+
+leaderboard = Leaderboard.new({
+	store = ordered,
+	now = os.time,
+	size = Config.BoardCacheSize,
+	refreshSeconds = Config.BoardRefreshSeconds,
+	log = log,
 })
 
 tally = Tally.new({
 	seasons = seasonStore,
-	leaderboard = Leaderboard.new({
-		store = ordered,
-		now = os.time,
-		size = Config.BoardCacheSize,
-		refreshSeconds = Config.BoardRefreshSeconds,
-		log = log,
-	}),
+	leaderboard = leaderboard,
 	profiles = {
 		-- Only a session that would be saved may change anything: a read-only or lost one has no
 		-- profile here, so scoring refuses it.
@@ -275,6 +302,35 @@ tally = Tally.new({
 	log = log,
 })
 
+handlers = Handlers.new({
+	validate = Validate,
+	limiter = RateLimiter.new(Config.Limits.BurstPerPlayer, Config.Limits.RefillPerSecond, os.clock),
+	storeLimiter = RateLimiter.new(
+		Config.Limits.StoreBurstPerPlayer,
+		Config.Limits.StoreOpsPerMinute / 60,
+		os.clock
+	),
+	storeCost = Config.Limits.StoreCost,
+	config = Config,
+	tally = tally,
+	allowed = function(userId: number): boolean
+		return sessions:writableSession(userId) ~= nil
+	end,
+	setPage = function(userId: number, page: number)
+		pages[userId] = page
+	end,
+	sync = syncPlayer,
+	log = log,
+})
+
+-- Requests from clients: intent only (claim_streak, board_page). Nothing here changes a score.
+request.OnServerEvent:Connect(function(player: Player, action: any, a: any)
+	local ok, err = pcall(handlers.handle, handlers, player.UserId, action, a)
+	if not ok then
+		log("request error: " .. tostring(err))
+	end
+end)
+
 -- Scoring for the game's own server code. Only server code can reach ServerStorage, and no remote
 -- accepts points: the game calls this from its own scripts with a number it decided.
 local record = Instance.new("BindableFunction")
@@ -298,6 +354,9 @@ end
 
 local function onPlayerRemoving(player: Player)
 	local userId = player.UserId
+	handlers.deps.limiter:forget(userId)
+	handlers.deps.storeLimiter:forget(userId)
+	pages[userId] = nil
 	lastNotice[userId] = nil
 	-- Push the score first: it reads the live session, which the leave then releases.
 	task.spawn(tally.push, tally, userId)
