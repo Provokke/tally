@@ -41,7 +41,7 @@ The season key is the single source of truth about how a season ended. The playe
 
 ## How a season ends and pays
 
-- **Record: server only.** `Tally.record` raises the profile's score for the current season and the lifetime total. The score is pushed to the ordered store on a timer.
+- **Record: server only.** `Tally.record` raises the profile's score for the current season and the lifetime total. The score is pushed to the ordered store on a timer. While the previous season is not known closed (or is still inside `CloseGraceSeconds` of its end) the push also writes the player's score in that season, so a score made in the last push interval still reaches the board the close reads.
 - **Close: one write.** Once a season is past its end by `CloseGraceSeconds` (60) on the closing server's clock, a server reads the top entries and writes `close` through `UpdateAsync`. The write refuses a season that is missing, not open or not yet ended. Running it again refuses `not_open`, so every later closer reads the stored podium and decides from that.
 - **A server with a slow clock waits.** It can't close early, and its late `record` is refused once the profile has been paid.
 - **Payout: one save.** For each season in the profile that has a score, isn't paid and is older than the current one, the server decides from the closed season key: the tier from the player's own score, plus the podium bonus if they are on the stored podium. It applies the Coins, sets `rewarded` and `tier`, adds a notice and saves once, bound to the live session's profile. If the save fails, the change is put back and the next settle tries again.

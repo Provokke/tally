@@ -108,6 +108,36 @@ return {
 		end,
 	},
 	{
+		-- The last push interval of a season. The script's push loop runs every BoardPushSeconds; a
+		-- score made one second before the end has not been pushed when the clock turns over.
+		name = "a score made one second before a season ends reaches that season's board and the stored podium",
+		run = function()
+			local endsAt = Config.Epoch + Config.SeasonLengthSeconds
+			local world = started({ start = endsAt - 20 })
+			world:join(1)
+			world.sched:advance(1)
+			world.sched:advance(18) -- endsAt - 1
+			local ok, why = world:record(1, 100)
+			assert(ok and why == nil, tostring(why))
+			world.sched:advance(Config.BoardPushSeconds) -- the push tick lands after the turn
+			assert(world.clock:now() > endsAt, "the clock has turned")
+			local board = world.ordered["tally-1"]
+			assert(board ~= nil and board.current["1"] == 100, "season 1's board holds the score")
+			world.sched:advance(Config.SettleSeconds * 2 + Config.CloseGraceSeconds)
+			local stored = world.records["season/1"]
+			assert(stored ~= nil and stored.state == "closed", "the season closed")
+			assert(
+				stored.podium[1] ~= nil and stored.podium[1].userId == 1 and stored.podium[1].score == 100,
+				"and the podium has the score"
+			)
+			assert(
+				world:lastSync(1).coins == Config.StartingCoins + 150 + Config.PodiumBonus[1],
+				"paid with the bonus"
+			)
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
 		name = "a Studio demo season is DemoSeasonSeconds long in the first Sync",
 		run = function()
 			local world = started({

@@ -122,14 +122,41 @@ function Tally.record(self: Tally, userId: number, points: any): (boolean, strin
 	return deps.Scores.record(profile, id, points, self:view(id), deps.now(), scoreRules(self))
 end
 
--- Writes the player's current season score to the board (the cache). A failure is only logged.
+-- Whether the season before the current one is still pushed: a score made in its last push
+-- interval is only in memory when the clock turns over, so until the season is known closed (and
+-- past the close grace) the push carries it to that season's board. A paid season has been closed.
+local function pushesPrevious(self: Tally, id: number, profile: any): boolean
+	local deps = self.deps
+	local entry = profile.seasons[deps.Scores.key(id)]
+	if entry == nil or entry.rewarded then
+		return false
+	end
+	local known = self.known[id]
+	if
+		known ~= nil
+		and known.state == "closed"
+		and deps.now() >= known.endsAt + deps.config.CloseGraceSeconds
+	then
+		return false
+	end
+	return true
+end
+
+-- Writes the player's current season score to the board (the cache), and the previous season's
+-- while it may still be waiting for its close. A failure is only logged.
 function Tally.push(self: Tally, userId: number): boolean
+	local deps = self.deps
 	local id = self:currentId()
-	local profile = self.deps.profiles.get(userId)
+	local profile = deps.profiles.get(userId)
 	if id == nil or profile == nil then
 		return false
 	end
-	return self.deps.leaderboard:push(id, userId, self.deps.Scores.score(profile, id))
+	local ok = deps.leaderboard:push(id, userId, deps.Scores.score(profile, id))
+	local previous = id - 1
+	if previous >= 1 and pushesPrevious(self, previous, profile) then
+		ok = deps.leaderboard:push(previous, userId, deps.Scores.score(profile, previous)) and ok
+	end
+	return ok
 end
 
 function Tally.busy(self: Tally, userId: number): boolean

@@ -34,23 +34,25 @@ local function build(options: any?): any
 	w.ordered = opts.ordered or FakeOrderedDataStore.new(w.clock, 0)
 	w.orderedHandle = w.ordered:handle(Faults.new())
 	w.orderedWrites = 0
-	local counted: any = {
-		SetAsync = function(_: any, key: string, value: number)
-			w.orderedWrites += 1
-			w.orderedHandle:SetAsync(key, value)
-		end,
-		GetSortedAsync = function(_: any, ...: any)
-			return w.orderedHandle:GetSortedAsync(...)
-		end,
-	}
+	w.writtenSeasons = {} -- the season id of each ordered write, in order
+	local function counted(id: number): any
+		return {
+			SetAsync = function(_: any, key: string, value: number)
+				w.orderedWrites += 1
+				table.insert(w.writtenSeasons, id)
+				w.orderedHandle:SetAsync(key, value)
+			end,
+			GetSortedAsync = function(_: any, ...: any)
+				return w.orderedHandle:GetSortedAsync(...)
+			end,
+		}
+	end
 	w.logs = {}
 	local function log(message: string)
 		table.insert(w.logs, message)
 	end
 	w.board = Leaderboard.new({
-		store = function(_: number): any
-			return counted
-		end,
+		store = counted,
 		now = function(): number
 			return w.clock:now()
 		end,
@@ -65,6 +67,7 @@ local function build(options: any?): any
 		ScoreMode = "sum",
 		ScoreStat = "points",
 		MaxPointsPerCall = 1000,
+		CloseGraceSeconds = 60,
 	}
 	w.tally = Tally.new({
 		seasons = w.handle,
@@ -258,6 +261,53 @@ return {
 			assert(w.tally:push(2))
 			assert(w.orderedWrites == 2 and w.ordered.current["2"] == nil, "no season entry, no write")
 			assert(not w.tally:push(3), "no live profile")
+		end,
+	},
+	{
+		-- The last push interval of a season: a score made at endsAt-1 is only in memory when the
+		-- clock turns, so the push that follows must still write it to the season it belongs to.
+		name = "push also writes the previous season's score until it is known closed and past the grace, and not once paid",
+		run = function()
+			local w = build()
+			w.live[1] = newProfile()
+			w.clock.t = 1099
+			w.tally:tick()
+			assert(w.tally:record(1, 40))
+			w.clock.t = 1100
+			assert(w.tally:currentId() == 2)
+			assert(w.tally:push(1))
+			assert(w.ordered.current["1"] == 40 and w.writtenSeasons[1] == 1, "season 1's board has it")
+			assert(w.tally:push(1) and w.orderedWrites == 1, "the same score is not written twice")
+			w.tally:tick()
+			w.tally:ensureOpen(1)
+			closeStored(w, 1, 1160)
+			w.tally:read(1)
+			w.live[1].seasons["1"].score = 55 -- a late change in the profile of the closed season
+			w.clock.t = 1100 + 59
+			assert(
+				w.tally:push(1) and w.orderedWrites == 2,
+				"within the grace a closed season is still pushed"
+			)
+			w.clock.t = 1100 + 60
+			w.live[1].seasons["1"].score = 56
+			assert(w.tally:push(1) and w.orderedWrites == 2, "known closed and past the grace: not pushed")
+			-- a paid season is never pushed again
+			local w2 = build()
+			w2.live[1] = newProfile()
+			w2.clock.t = 1099
+			w2.tally:tick()
+			assert(w2.tally:record(1, 40))
+			w2.live[1].seasons["1"].rewarded = true
+			w2.clock.t = 1110
+			assert(w2.tally:push(1) and w2.orderedWrites == 0, "rewarded: nothing to push")
+			-- the season before the previous one is not pushed
+			local w3 = build()
+			w3.live[1] = newProfile()
+			w3.clock.t = 1099
+			w3.tally:tick()
+			assert(w3.tally:record(1, 40))
+			w3.clock.t = 1210
+			assert(w3.tally:push(1) and w3.orderedWrites == 0, "season 1 is two seasons back")
 		end,
 	},
 	{
