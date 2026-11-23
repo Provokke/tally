@@ -167,4 +167,98 @@ return {
 			assert(string.find(world.startError, "You must publish this place", 1, true), world.startError)
 		end,
 	},
+	{
+		name = "demo seed: a Studio join closes the seeded prior season and the first Sync carries the reward notice",
+		run = function()
+			local world = started({
+				studio = true,
+				unpublished = true,
+				attributes = { TallyDemoSeed = true, TallyDemoSeason = true },
+				start = Config.Epoch + 5 * Config.DemoSeasonSeconds + 10,
+			})
+			world:join(1)
+			world.sched:advance(Config.SettleSeconds + 1)
+			local sync = world:lastSync(1)
+			assert(sync ~= nil and sync.season.id == 6, tostring(sync and sync.season.id))
+			local found = false
+			for _, entry in world:allSynced(1) do
+				for _, notice in entry.notices do
+					if string.find(notice.text, "Season 5 is over. You scored 85 points, ", 1, true) then
+						found = true
+					end
+				end
+			end
+			assert(found, "a Sync carried the season 5 notice")
+			assert(sync.coins > Config.StartingCoins, "and the Coins were paid")
+			assert(
+				world.memoryBoards[1] ~= nil and world.memoryBoards[1]:GetAsync("101") ~= nil,
+				"the board is seeded"
+			)
+			assert(#world.errors == 0, world.errors[1])
+			assert(not warned(world, "demo seed failed"), "no seeding error")
+		end,
+	},
+	{
+		name = "demo seed: without the TallyDemoSeed attribute nothing is seeded",
+		run = function()
+			local world = started({
+				studio = true,
+				unpublished = true,
+				attributes = { TallyDemoSeason = true },
+				start = Config.Epoch + 5 * Config.DemoSeasonSeconds + 10,
+			})
+			world:join(1)
+			world.sched:advance(Config.SettleSeconds + 1)
+			assert(
+				#world.memoryBoards == 0 or world.memoryBoards[1]:GetAsync("101") == nil,
+				"the board is not seeded"
+			)
+			assert(world:lastSync(1).coins == Config.StartingCoins, "nothing was paid")
+			for _, entry in world:allSynced(1) do
+				assert(#entry.notices == 0, "no reward notice")
+			end
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
+		name = "demo seed: outside Studio nothing is seeded, even with the attribute",
+		run = function()
+			local world = started({
+				attributes = { TallyDemoSeed = true, TallyDemoSeason = true },
+				start = Config.Epoch + 6 * Config.SeasonLengthSeconds + 10,
+			})
+			world:join(1)
+			world.sched:advance(Config.SettleSeconds + 1)
+			assert(
+				#world.memoryBoards == 0 or world.memoryBoards[1]:GetAsync("101") == nil,
+				"the board is not seeded"
+			)
+			assert(world:lastSync(1).coins == Config.StartingCoins, "nothing was paid")
+			for _, entry in world:allSynced(1) do
+				assert(#entry.notices == 0, "no reward notice")
+			end
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
+		name = "demo seed: with TallyUseDataStore on a published place nothing is seeded",
+		run = function()
+			local world = started({
+				studio = true,
+				attributes = { TallyDemoSeed = true, TallyDemoSeason = true, TallyUseDataStore = true },
+				start = Config.Epoch + 5 * Config.DemoSeasonSeconds + 10,
+			})
+			world:join(1)
+			world.sched:advance(Config.SettleSeconds + 1)
+			assert(
+				#world.memoryBoards == 0 or world.memoryBoards[1]:GetAsync("101") == nil,
+				"the board is not seeded"
+			)
+			assert(world:lastSync(1).coins == Config.StartingCoins, "nothing was paid")
+			for _, entry in world:allSynced(1) do
+				assert(#entry.notices == 0, "no reward notice")
+			end
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
 }

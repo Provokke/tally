@@ -15,6 +15,7 @@ local ConfigCheck = require(Shared:WaitForChild("ConfigCheck"))
 local RateLimiter = require(Shared:WaitForChild("RateLimiter"))
 local Validate = require(Shared:WaitForChild("Validate"))
 
+local DemoSeed = require(script.DemoSeed)
 local Handlers = require(script.Handlers)
 local Lease = require(script.Data.Lease)
 local Leaderboard = require(script.Leaderboard)
@@ -222,11 +223,49 @@ local function settlePlayer(userId: number)
 	end
 end
 
+-- The Studio demo seed: pretend players on the board and one finished season for the player, so the
+-- first settle pays a reward. Only in Studio, only over the in-memory stores, only with the
+-- TallyDemoSeed attribute, and once per player. A failure is logged, never raised.
+local demoDone: { [number]: boolean } = {}
+
+local function seedDemo(userId: number, session: any)
+	if
+		useRealStore
+		or not RunService:IsStudio()
+		or ServerStorage:GetAttribute("TallyDemoSeed") ~= true
+		or demoDone[userId]
+	then
+		return
+	end
+	demoDone[userId] = true
+	local ok, err = pcall(function()
+		local id = tally:currentId()
+		if id == nil then
+			return
+		end
+		local plan = DemoSeed.plan(userId, id)
+		for boardId, rows in plan.board do
+			for key, score in rows do
+				ordered(boardId):SetAsync(key, score)
+			end
+		end
+		for key, entry in plan.profile do
+			if session.data.seasons[key] == nil then
+				session.data.seasons[key] = entry
+			end
+		end
+	end)
+	if not ok then
+		log(`demo seed failed for {userId}: {tostring(err)}`)
+	end
+end
+
 -- A session went live: settle what it holds and show it, each in its own thread, as both yield (the
 -- settle on the stores, the Sync on the board's cached read) and the join is not held up by either.
 -- The settle starts first and the Sync does not wait for it, so the player sees their state before
 -- a slow settle finishes.
-local function onSessionReady(userId: number, _session: any)
+local function onSessionReady(userId: number, session: any)
+	seedDemo(userId, session)
 	task.spawn(settlePlayer, userId)
 	task.spawn(syncPlayer, userId, nil)
 end

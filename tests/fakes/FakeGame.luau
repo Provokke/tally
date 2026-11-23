@@ -35,8 +35,8 @@ local DATA: { [string]: any } = {
 	Store = require("../../src/server/Data/Store"),
 }
 
--- A module is added here when its task creates it: DemoSeed (Task 15) is not here yet.
 local SERVER: { [string]: any } = {
+	DemoSeed = require("../../src/server/DemoSeed"),
 	Handlers = require("../../src/server/Handlers"),
 	Leaderboard = require("../../src/server/Leaderboard"),
 	Notices = require("../../src/server/Notices"),
@@ -408,6 +408,17 @@ function FakeGame.new(options: Options?): any
 			end
 		end
 		return nil
+	end
+
+	-- Every Sync sent to a player, oldest first.
+	function world.allSynced(self: any, userId: number): { any }
+		local out = {}
+		for _, entry in self.synced do
+			if entry.userId == userId then
+				table.insert(out, entry.payload)
+			end
+		end
+		return out
 	end
 
 	return world
