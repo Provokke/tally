@@ -98,7 +98,7 @@ local function build(options: any?): any
 			return math.floor(w.clock:now())
 		end,
 		serverId = opts.serverId or "A",
-		length = 100,
+		length = opts.length or 100,
 		config = w.config,
 		Season = Season,
 		Scores = Scores,
@@ -211,17 +211,17 @@ return {
 		end,
 	},
 	{
-		name = "a stored key still open past this server's clock waits, writes no close, and closes at its end",
+		name = "a stored key whose end is not the config's is refused, not closed early: nothing is written and nothing paid",
 		run = function()
 			local w = world()
 			storeOpen(w, 1, 5000)
 			assert(w.tally:settle(1) == 0)
 			assert(w.ds.calls == 0, "no close write")
 			assert(w.records["season/1"].state == "open" and w.live[1].coins == 0 and w.saves == 0)
+			assert(logged(w, "does not match") == 1, table.concat(w.logs, "; "))
 			w.clock.t = 5000 + GRACE
-			assert(w.tally:settle(1) == 1)
-			assert(w.records["season/1"].state == "closed")
-			assert(w.live[1].coins == 450)
+			assert(w.tally:settle(1) == 0, "the key's own end does not make it closable")
+			assert(w.records["season/1"].state == "open" and w.ds.calls == 0)
 		end,
 	},
 	{
@@ -491,6 +491,23 @@ return {
 			resume(run)
 			assert(run.paid == 0, `paid {run.paid}`)
 			assert(w.live[1].coins == 0 and w.saves == 0 and #w.live[1].notices == 0)
+		end,
+	},
+	{
+		-- SeasonLengthSeconds doubled on a live game: season 3 is [1400, 1600) now, but the stored
+		-- key was made under length 100, [1200, 1300). A closed key from the old numbering must not
+		-- pay a score earned in the new one.
+		name = "a season key whose window is not the config's is not paid from, and says so",
+		run = function()
+			local w = world({ ["3"] = 60 }, nil, { start = 2000, length = 200 })
+			w.records["season/3"] = Season.close(Season.open(nil, 3, 1200, 1300), 1300, {}, "X")
+			assert(w.tally:currentId() == 6)
+			assert(w.tally:settle(1) == 0, "nothing is paid")
+			assert(w.live[1].coins == 0 and w.saves == 0 and #w.live[1].notices == 0)
+			assert(w.live[1].seasons["3"].rewarded == false, "the score stays unpaid for the operator")
+			assert(logged(w, "does not match") == 1, table.concat(w.logs, "; "))
+			assert(w.tally:settle(1) == 0 and logged(w, "does not match") == 1, "once per season")
+			assert(w.records["season/3"].endsAt == 1300, "the key is untouched")
 		end,
 	},
 	{

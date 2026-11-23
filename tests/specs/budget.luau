@@ -159,7 +159,7 @@ return {
 			world.sched:advance(1)
 			assert(world:record(1, 20))
 			world.sched:advance(105) -- season 2 now; season 1 is old and unpaid
-			-- Season 1's key is open with a far-off end, so a settle waits on it.
+			-- Season 1's key is stored with a window the config does not give, so a settle leaves it alone.
 			world.records["season/1"] = Season.open(nil, 1, START, START + 1000000000)
 			world.ds.events = {}
 			-- Polls fall 120, 180 and 240 seconds after the start (every SettleSeconds).

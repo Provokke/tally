@@ -36,6 +36,12 @@ function Season.window(epoch: number, length: number, id: number): (number, numb
 	return startsAt, startsAt + length
 end
 
+-- Whether a stored season holds the window the config gives its id. False for a key made under
+-- another SeasonLengthSeconds or Epoch, whose id then means a different span of time.
+function Season.matches(stored: any, startsAt: number, endsAt: number): boolean
+	return type(stored) == "table" and stored.startsAt == startsAt and stored.endsAt == endsAt
+end
+
 -- Creates the key if it is missing. An existing key, open or closed, is left alone.
 function Season.open(current: Season?, id: number, startsAt: number, endsAt: number): (Season?, string?)
 	if current ~= nil then

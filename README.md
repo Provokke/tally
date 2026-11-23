@@ -150,7 +150,9 @@ local record = game:GetService("ServerStorage"):WaitForChild("TallyRecord") :: B
 local accepted, reason = record:Invoke(player, 10)
 ```
 
-To change the season length, tiers, podium or streak rewards, edit `Config.luau`. The server refuses to start on a bad config.
+To change tiers, the podium or streak rewards, edit `Config.luau`. The server refuses to start on a bad config.
+
+**Do not change `SeasonLengthSeconds` or `Epoch` on a live game.** Season ids come from them, so a new length renumbers the seasons into keys that already hold other seasons' closes and podiums. To change the length, set a new `Epoch` at a future season boundary and a new `SeasonStoreName` and `BoardStorePrefix` (the old data stays under the old names). The ids then start again at 1, and a profile keeps each season's score under its id, so also add a migration step (or use a new `DataStoreName`, which starts every player fresh) to deal with the old season entries. The server enforces a backstop: a stored season whose start and end are not the window the config gives its id is logged, is not scored into and is not paid from, and `record` answers `season_mismatch` for it until the config matches again.
 
 In Studio the server uses an in-memory store and in-memory ordered stores, so the place runs unpublished and nothing is saved between plays. To use the real DataStore, set the attribute `TallyUseDataStore` to true on ServerStorage and turn on API access for the place. To watch a season start to finish, set `TallyDemoSeason` to true, and to fill the board in Studio, set `TallyDemoSeed` to true.
 

@@ -33,12 +33,20 @@ export type Tally = typeof(setmetatable(
 		settling: { [number]: boolean },
 		calling: { [number]: boolean },
 		boardFailedAt: { [number]: number }, -- when a season's podium read first failed, until one works
+		mismatched: { [number]: boolean }, -- seasons whose stored window is not the config's
 	},
 	Tally
 ))
 
 function Tally.new(deps: Deps): Tally
-	return setmetatable({ deps = deps, known = {}, settling = {}, calling = {}, boardFailedAt = {} }, Tally)
+	return setmetatable({
+		deps = deps,
+		known = {},
+		settling = {},
+		calling = {},
+		boardFailedAt = {},
+		mismatched = {},
+	}, Tally)
 end
 
 function Tally.currentId(self: Tally): number?
@@ -56,7 +64,31 @@ function Tally.view(self: Tally, id: number): any
 	return { endsAt = endsAt, state = "open" }
 end
 
--- Reads season/<id>. A read that raises is nil (the caller waits for the next poll).
+-- Takes a stored season as this server's view of it, unless the window it holds is not the one the
+-- config gives. That happens when SeasonLengthSeconds or Epoch is changed on a live game: the ids
+-- then point at keys made under the old numbering. Such a key is never used: nothing is scored into
+-- it and nothing is paid from it. Logged once per season.
+local function accept(self: Tally, id: number, stored: any): any?
+	local deps = self.deps
+	local startsAt, endsAt = deps.Season.window(deps.config.Epoch, deps.length, id)
+	if not deps.Season.matches(stored, startsAt, endsAt) then
+		if not self.mismatched[id] then
+			self.mismatched[id] = true
+			deps.log(
+				`season {id} is stored as {tostring(stored.startsAt)}-{tostring(stored.endsAt)} but the config says {startsAt}-{endsAt}: `
+					.. "the season does not match, so it is refused. SeasonLengthSeconds or Epoch was changed on a live game; "
+					.. "see the README before changing either."
+			)
+		end
+		return nil
+	end
+	self.mismatched[id] = nil
+	self.known[id] = stored
+	return stored
+end
+
+-- Reads season/<id>. A read that raises is nil (the caller waits for the next poll), and so is a
+-- key that is missing or does not match the config's window.
 function Tally.read(self: Tally, id: number): any?
 	local ok, stored = pcall(function()
 		return self.deps.seasons:GetAsync(self.deps.Season.key(id))
@@ -65,10 +97,10 @@ function Tally.read(self: Tally, id: number): any?
 		self.deps.log(`season {id} read failed: {tostring(stored)}`)
 		return nil
 	end
-	if stored ~= nil then
-		self.known[id] = stored
+	if stored == nil then
+		return nil
 	end
-	return stored
+	return accept(self, id, stored)
 end
 
 -- Creates season/<id> if it is missing and returns what is stored. Season.open is idempotent, so
@@ -89,8 +121,7 @@ function Tally.ensureOpen(self: Tally, id: number): any?
 	if result == nil then
 		return self:read(id) -- a cancelled update: read what is stored
 	end
-	self.known[id] = result
-	return result
+	return accept(self, id, result)
 end
 
 -- Keeps the current season's key present and this server's view of it fresh.
@@ -114,6 +145,9 @@ function Tally.record(self: Tally, userId: number, points: any): (boolean, strin
 	local id = self:currentId()
 	if id == nil then
 		return false, "no_season"
+	end
+	if self.mismatched[id] then
+		return false, "season_mismatch"
 	end
 	local profile = deps.profiles.get(userId)
 	if profile == nil then
@@ -216,8 +250,7 @@ local function closeSeason(self: Tally, id: number): any?
 	if result == nil then
 		return self:read(id)
 	end
-	self.known[id] = result
-	return result
+	return accept(self, id, result)
 end
 
 -- One in-memory change (Coins, the paid flag, the notice), then one save bound to this profile.
@@ -266,6 +299,9 @@ local function settleSeasons(self: Tally, userId: number): number
 		local season = self.known[id]
 		if season == nil or season.state ~= "closed" then
 			season = self:read(id)
+		end
+		if season == nil and self.mismatched[id] then
+			continue -- its stored window is not the config's: nothing to open, close or pay
 		end
 		for _ = 1, 4 do
 			local entry = profile.seasons[key]

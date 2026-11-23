@@ -311,6 +311,47 @@ return {
 		end,
 	},
 	{
+		-- SeasonLengthSeconds changed on a live game renumbers the seasons: the id the clock now gives
+		-- maps to a stored key made under the old length. Nothing may be scored into or paid from it.
+		name = "a stored season whose window is not the config's is refused: logged once, not scored into, not remembered",
+		run = function()
+			local w = build()
+			w.clock.t = 1150
+			w.live[1] = newProfile()
+			-- length 100 puts season 2 at [1100, 1200); the key says [1100, 1300), as a length of 200 made it
+			w.records["season/2"] = Season.close(Season.open(nil, 2, 1100, 1300), 1300, {}, "X")
+			assert(w.tally:tick() == 2)
+			assert(w.tally.known[2] == nil, "a key from another window is not remembered")
+			local text = ""
+			for _, line in w.logs do
+				if string.find(line, "does not match", 1, true) then
+					text ..= line
+				end
+			end
+			assert(text ~= "" and string.find(text, "season 2", 1, true), table.concat(w.logs, "; "))
+			w.tally:tick()
+			local n = 0
+			for _, line in w.logs do
+				if string.find(line, "does not match", 1, true) then
+					n += 1
+				end
+			end
+			assert(n == 1, `logged once per season, not on every tick: {n}`)
+			local ok, why = w.tally:record(1, 10)
+			assert(not ok and why == "season_mismatch", tostring(why))
+			assert(w.live[1].seasons["2"] == nil, "nothing was scored")
+			assert(
+				w.records["season/2"].state == "closed" and w.records["season/2"].endsAt == 1300,
+				"key untouched"
+			)
+			-- put right (the operator restores the old length's key): the season works again
+			w.records["season/2"] = Season.open(nil, 2, 1100, 1200)
+			w.tally:tick()
+			assert(w.tally:record(1, 10), "a key that matches again is used")
+			assert(w.tally.known[2] ~= nil and w.live[1].seasons["2"].score == 10)
+		end,
+	},
+	{
 		name = "record never yields",
 		run = function()
 			local w = build()

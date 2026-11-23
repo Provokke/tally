@@ -9,6 +9,12 @@ return table.freeze({
 	LoadRetries = 5, -- attempts to load a profile before giving up
 	RetryBaseSeconds = 1, -- doubles each retry: 1, 2, 4, 8 (five attempts, four waits)
 	CloseTimeoutSeconds = 25, -- BindToClose gets about 30 s in total, leave headroom
+	-- Season ids come from Epoch and SeasonLengthSeconds, so neither may change on a live game: a new
+	-- length renumbers the seasons into keys that already hold other seasons. To change the length, set
+	-- a new Epoch at a future season boundary together with a new SeasonStoreName and BoardStorePrefix.
+	-- The ids then start again at 1, and a profile keeps scores under those ids, so a migration step
+	-- (or a new DataStoreName) has to deal with the old season entries as well.
+	-- A stored season whose window is not the one these give is refused (see the README).
 	Epoch = 1767225600, -- 2026-01-01 00:00 UTC, season 1 starts here
 	SeasonLengthSeconds = 1209600, -- 14 days
 	DemoSeasonSeconds = 180, -- a Studio season when ServerStorage TallyDemoSeason is true

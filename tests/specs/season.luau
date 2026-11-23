@@ -117,4 +117,18 @@ return {
 			assert(Deep.equal(a, b))
 		end,
 	},
+	{
+		name = "matches is true only for the window the config gives, whatever the state, and false for a non-table",
+		run = function()
+			local season: any = Season.open(nil, 3, 1200, 1300)
+			assert(Season.matches(season, 1200, 1300))
+			assert(
+				Season.matches(Season.close(season, 1300, {}, "A"), 1200, 1300),
+				"a closed key is judged the same"
+			)
+			assert(not Season.matches(season, 1200, 1400), "another end")
+			assert(not Season.matches(season, 1100, 1300), "another start")
+			assert(not Season.matches(nil, 1200, 1300) and not Season.matches(5, 1200, 1300))
+		end,
+	},
 }

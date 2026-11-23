@@ -138,6 +138,27 @@ return {
 		end,
 	},
 	{
+		name = "a stored season from another window is refused by the script: warned, and a record is turned away",
+		run = function()
+			-- Season 1 is [Epoch, Epoch + length); this key says it was twice as long.
+			local stale = {
+				id = 1,
+				startsAt = Config.Epoch,
+				endsAt = Config.Epoch + 2 * Config.SeasonLengthSeconds,
+				state = "open",
+				podium = {},
+			}
+			local world = started({ start = Config.Epoch + 10, records = { ["season/1"] = stale } })
+			world:join(1)
+			world.sched:advance(1)
+			local ok, why = world:record(1, 30)
+			assert(not ok and why == "season_mismatch", tostring(why))
+			assert(warned(world, "does not match"), "the operator is told")
+			assert(world.records["season/1"].endsAt == stale.endsAt, "the key is untouched")
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
 		name = "a Studio demo season is DemoSeasonSeconds long in the first Sync",
 		run = function()
 			local world = started({
