@@ -33,7 +33,8 @@ return table.freeze({
 	StreakRewards = table.freeze({ 10, 15, 20, 30, 40, 60, 100 }), -- Coins by streak count, capped at the last
 	SettleSeconds = 60, -- how often players holding an unpaid old season are settled
 	CloseGraceSeconds = 60, -- a season is closed only this long after its end by the closing server's clock
-	PodiumWaitSeconds = 3600, -- how long a close keeps waiting, from its first failed board read, before closing without a podium
+	PodiumWaitSeconds = 3600, -- how long a close keeps waiting, from the first failed board read of an outage, before closing without a podium
+	PodiumMaxSeconds = 86400, -- after this long past a season's end a close stops waiting for the board and closes without a podium
 	SeasonTickSeconds = 10, -- how often the server makes sure the current season key exists
 	BoardPushSeconds = 30, -- how often each player's score is written to the ordered store
 	BoardRefreshSeconds = 15, -- the most often one server reads the ordered store for Browse

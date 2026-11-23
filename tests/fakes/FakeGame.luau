@@ -326,6 +326,9 @@ function FakeGame.new(options: Options?): any
 		},
 		os = {
 			time = function(): number
+				if world.onOsTime ~= nil then
+					world.onOsTime() -- a spec may make the clock read raise
+				end
 				return math.floor(world.clock:now() + skew)
 			end,
 			clock = function(): number

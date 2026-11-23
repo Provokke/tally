@@ -36,7 +36,7 @@ export type Tally = typeof(setmetatable(
 		settling: { [number]: boolean },
 		calling: { [number]: boolean },
 		closing: { [number]: boolean }, -- seasons this server is closing right now
-		boardFailedAt: { [number]: number }, -- when a season's podium read first failed, until one works
+		boardOutage: { [number]: { first: number, last: number } }, -- a season's podium read outage: first and latest failed attempt
 		mismatched: { [number]: boolean }, -- seasons whose stored window is not the config's
 	},
 	Tally
@@ -49,7 +49,7 @@ function Tally.new(deps: Deps): Tally
 		settling = {},
 		calling = {},
 		closing = {},
-		boardFailedAt = {},
+		boardOutage = {},
 		mismatched = {},
 	}, Tally)
 end
@@ -82,6 +82,14 @@ local function fetch(self: Tally, id: number): (boolean, any)
 	return true, stored
 end
 
+-- What the mismatch log shows of a stored value: its window, or the value itself when it is not a table.
+local function describe(stored: any): string
+	if type(stored) ~= "table" then
+		return `{typeof(stored)} {tostring(stored)}`
+	end
+	return `{tostring(stored.startsAt)}-{tostring(stored.endsAt)}`
+end
+
 -- Takes a stored season as this server's view of it, unless the window it holds is not the one the
 -- config gives. That happens when SeasonLengthSeconds or Epoch is changed on a live game: the ids
 -- then point at keys made under the old numbering. Such a key is never used: nothing is scored into
@@ -93,7 +101,7 @@ local function accept(self: Tally, id: number, stored: any): any?
 		if not self.mismatched[id] then
 			self.mismatched[id] = true
 			deps.log(
-				`season {id} is stored as {tostring(stored.startsAt)}-{tostring(stored.endsAt)} but the config says {startsAt}-{endsAt}: `
+				`season {id} is stored as {describe(stored)} but the config says {startsAt}-{endsAt}: `
 					.. "the season does not match, so it is refused. SeasonLengthSeconds or Epoch was changed on a live game; "
 					.. "see the README before changing either."
 			)
@@ -237,23 +245,33 @@ local function closeOnce(self: Tally, id: number): any?
 	if podium == nil then
 		-- A board that can't be read now may be back on the next settle, so wait rather than freeze
 		-- an empty podium for everyone. Only once reads have kept failing for PodiumWaitSeconds, from
-		-- the first failed attempt this server made, does the season close without one, so a board
-		-- that never returns can't block rewards. (Measured from the season's end, a first player who
-		-- joined hours late would freeze an empty podium on one failed read.)
-		local failedAt = self.boardFailedAt[id]
-		if failedAt == nil then
+		-- the first failed attempt of this outage on this server, does the season close without one,
+		-- so a board that never returns can't block rewards. (Measured from the season's end, a first
+		-- player who joined hours late would freeze an empty podium on one failed read.) An outage
+		-- is a run of failed attempts no more than twice SettleSeconds apart: a gap longer than that
+		-- (the player who failed has left, the board came back and went again) starts a new one, so
+		-- an old timer can't make one new failure close the season. Whatever the outage, a season
+		-- is closed without a podium once PodiumMaxSeconds have passed since its end, so players
+		-- are eventually paid.
+		local now = deps.now()
+		local outage = self.boardOutage[id]
+		if outage == nil or now - outage.last > 2 * deps.config.SettleSeconds then
 			-- Logged once per outage, not on every poll for every player.
-			failedAt = deps.now()
-			self.boardFailedAt[id] = failedAt
+			outage = { first = now, last = now }
+			self.boardOutage[id] = outage
 			deps.log(`podium read failed for season {id}, waiting: {tostring(why)}`)
 		end
-		if deps.now() - failedAt < deps.config.PodiumWaitSeconds then
+		outage.last = now
+		local _, endsAt = deps.Season.window(deps.config.Epoch, deps.length, id)
+		local waiting = now - outage.first < deps.config.PodiumWaitSeconds
+		local pastMax = closeClock(self) >= endsAt + deps.config.PodiumMaxSeconds
+		if waiting and not pastMax then
 			return nil
 		end
 		deps.log(`podium read failed for season {id}, closing without one: {tostring(why)}`)
 		podium = {}
 	else
-		self.boardFailedAt[id] = nil
+		self.boardOutage[id] = nil
 	end
 	local now = closeClock(self)
 	local ok, result = pcall(function()

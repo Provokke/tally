@@ -182,6 +182,46 @@ return {
 		end,
 	},
 	{
+		-- A season key holding something that is not a season at all (a number here). The mismatch
+		-- log must not index it, and the season tick keeps running.
+		name = "a corrupt season key is refused and warned without an error, and the season tick keeps running",
+		run = function()
+			local world = started({ start = Config.Epoch + 10, records = { ["season/1"] = 12345 } })
+			world:join(1)
+			world.sched:advance(1)
+			local ok, why = world:record(1, 30)
+			assert(not ok and why == "season_mismatch", tostring(why))
+			assert(warned(world, "does not match"), "the operator is told")
+			assert(not warned(world, "tick failed"), "the log line itself did not raise")
+			assert(world.records["season/1"] == 12345, "the key is untouched")
+			local reads = #world.ds.gets
+			world.sched:advance(Config.SeasonTickSeconds * 3)
+			assert(#world.ds.gets > reads, "the tick went on reading")
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
+		name = "a season tick that raises is logged and the tick loop carries on",
+		run = function()
+			local world = started({ start = Config.Epoch + 10 })
+			world.sched:advance(1)
+			assert(world.records["season/1"] ~= nil, "the first tick opened the season")
+			world.records["season/1"] = nil
+			local raised = false
+			world.onOsTime = function()
+				world.onOsTime = nil
+				raised = true
+				error("clock raised")
+			end
+			world.sched:advance(Config.SeasonTickSeconds)
+			assert(raised, "the tick ran into the raise")
+			assert(warned(world, "tick failed"), "and logged it")
+			assert(#world.errors == 0, world.errors[1])
+			world.sched:advance(Config.SeasonTickSeconds)
+			assert(world.records["season/1"] ~= nil, "the next tick ran and opened the season again")
+		end,
+	},
+	{
 		name = "a Studio demo season is DemoSeasonSeconds long in the first Sync",
 		run = function()
 			local world = started({

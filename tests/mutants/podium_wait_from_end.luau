@@ -3,6 +3,6 @@
 return {
 	name = "podium_wait_from_end",
 	file = "src/server/Tally.luau",
-	find = [==[if deps.now() - failedAt < deps.config.PodiumWaitSeconds then]==],
-	replace = [==[if closeClock(self) < select(2, deps.Season.window(deps.config.Epoch, deps.length, id)) + deps.config.PodiumWaitSeconds then]==],
+	find = [==[local waiting = now - outage.first < deps.config.PodiumWaitSeconds]==],
+	replace = [==[local waiting = closeClock(self) < endsAt + deps.config.PodiumWaitSeconds]==],
 }

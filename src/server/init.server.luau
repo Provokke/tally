@@ -427,7 +427,10 @@ end)
 -- script (the shutdown hook below).
 task.spawn(function()
 	while true do
-		tally:tick()
+		local ok, err = pcall(tally.tick, tally)
+		if not ok then
+			log(`tick failed: {tostring(err)}`)
+		end
 		task.wait(Config.SeasonTickSeconds)
 	end
 end)

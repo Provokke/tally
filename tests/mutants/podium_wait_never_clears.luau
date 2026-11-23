@@ -4,7 +4,7 @@ return {
 	name = "podium_wait_never_clears",
 	file = "src/server/Tally.luau",
 	find = [==[	else
-		self.boardFailedAt[id] = nil
+		self.boardOutage[id] = nil
 	end]==],
 	replace = [==[	end]==],
 }

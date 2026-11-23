@@ -18,6 +18,8 @@ local Tally = require("../../src/server/Tally")
 
 local GRACE = Config.CloseGraceSeconds
 local WAIT = Config.PodiumWaitSeconds
+local SETTLE = Config.SettleSeconds
+local MAX = Config.PodiumMaxSeconds
 
 local function newProfile(scores: { [string]: number }?): any
 	local seasons: any = {}
@@ -367,6 +369,11 @@ return {
 			assert(logged(w, "waiting") == 1 and logged(w, "closing without one") == 0)
 			assert(w.saves == 0 and w.live[1].coins == 0)
 
+			-- The outage goes on: the player's settle polls it every SettleSeconds.
+			for k = 1, WAIT // SETTLE - 1 do
+				w.clock.t = firstFail + k * SETTLE
+				assert(w.tally:settle(1) == 0, "still waiting")
+			end
 			w.clock.t = firstFail + WAIT - 1
 			assert(w.tally:settle(1) == 0, "still waiting one second before the wait runs out")
 			assert(logged(w, "waiting") == 1, "the wait is logged once per season, not on every poll")
@@ -405,18 +412,66 @@ return {
 		run = function()
 			local w = world(nil, nil, { start = 1100 + GRACE })
 			storeOpen(w, 1)
+			local t0 = w.clock.t
 			w.boardDown = true
 			assert(w.tally:settle(1) == 0)
 			w.boardDown = false
-			w.clock.t += WAIT / 2
+			w.clock.t = t0 + SETTLE
 			-- The board answers, but the close write itself fails: nothing is written.
 			w.ds:failNext(1, "boom")
 			assert(w.tally:settle(1) == 0)
+			assert(w.records["season/1"].state == "open")
 			w.boardDown = true
-			w.clock.t += WAIT / 2 + 1
-			assert(w.tally:settle(1) == 0, "the outage that began after the good read has not run out")
+			-- A new outage, polled every SettleSeconds: measured from the good read, not from t0.
+			for k = 2, WAIT // SETTLE do
+				w.clock.t = t0 + k * SETTLE
+				assert(w.tally:settle(1) == 0, "the outage that began after the good read has not run out")
+			end
 			assert(w.records["season/1"].state == "open")
 			assert(logged(w, "closing without one") == 0, table.concat(w.logs, "; "))
+			w.clock.t = t0 + 2 * SETTLE + WAIT
+			assert(w.tally:settle(1) == 1, "and once it has, the season closes without a podium")
+			assert(logged(w, "closing without one") == 1)
+		end,
+	},
+	{
+		-- P1's failed read at the end of the season starts a timer; P1 leaves. An hour or more
+		-- later P2 settles and meets one transient failure: that is a new outage, which waits.
+		name = "a failure timer left by a player who has gone does not close the season on a later player's one failed read",
+		run = function()
+			local w = world(nil, nil, { start = 1100 + GRACE + 1 })
+			w.live[2] = newProfile({ ["1"] = 40 })
+			storeOpen(w, 1)
+			w.boardDown = true
+			assert(w.tally:settle(1) == 0, "P1's failed read waits")
+			assert(logged(w, "waiting") == 1)
+			w.live[1] = nil -- P1 leaves; nobody settles for a long while
+			w.clock.t += WAIT + 600
+			assert(w.tally:settle(2) == 0, "P2's one failed read waits: it is a new outage")
+			assert(w.records["season/1"].state == "open" and w.ds.calls == 0, "no empty podium frozen")
+			assert(logged(w, "closing without one") == 0, table.concat(w.logs, "; "))
+			assert(logged(w, "waiting") == 2, "the new outage is logged")
+			w.boardDown = false
+			w.clock.t += SETTLE
+			assert(w.tally:settle(2) == 1)
+			assert(#w.records["season/1"].podium == 2, "the real podium")
+			assert(w.live[2].coins == 250, `tier plus second place: {w.live[2].coins}`)
+		end,
+	},
+	{
+		name = "a board that stays down past PodiumMaxSeconds after the end closes without a podium on the first failed read",
+		run = function()
+			local w = world(nil, nil, { start = 1100 + MAX + GRACE - 1 })
+			storeOpen(w, 1)
+			w.boardDown = true
+			assert(w.tally:settle(1) == 0, "one second before the limit it waits")
+			assert(w.records["season/1"].state == "open")
+			w.clock.t += 1 -- the close clock is now exactly PodiumMaxSeconds after the end
+			assert(w.tally:settle(1) == 1, "players are paid at the limit, though the outage is young")
+			local stored = w.records["season/1"]
+			assert(stored.state == "closed" and #stored.podium == 0, "closed with an empty podium")
+			assert(w.live[1].coins == 150, `the tier only: {w.live[1].coins}`)
+			assert(logged(w, "closing without one") == 1)
 		end,
 	},
 	{
