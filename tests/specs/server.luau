@@ -138,6 +138,29 @@ return {
 		end,
 	},
 	{
+		name = "every season read the script makes asks the store, not the local cache",
+		run = function()
+			local endsAt = Config.Epoch + Config.SeasonLengthSeconds
+			local world = started({ start = endsAt - 20 })
+			world:join(1)
+			world.sched:advance(1)
+			assert(world:record(1, 30))
+			world.sched:advance(Config.SettleSeconds * 3)
+			local seasonReads, cached = 0, 0
+			for _, get in world.ds.gets do
+				if string.sub(get.key, 1, 7) == "season/" then
+					seasonReads += 1
+					if not get.uncached then
+						cached += 1
+					end
+				end
+			end
+			assert(seasonReads >= 3, `the ticks and settles read the season keys: {seasonReads}`)
+			assert(cached == 0, `{cached} of {seasonReads} season reads allowed the cache`)
+			assert(#world.errors == 0, world.errors[1])
+		end,
+	},
+	{
 		name = "a stored season from another window is refused by the script: warned, and a record is turned away",
 		run = function()
 			-- Season 1 is [Epoch, Epoch + length); this key says it was twice as long.

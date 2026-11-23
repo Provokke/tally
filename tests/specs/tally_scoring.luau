@@ -85,6 +85,7 @@ local function build(options: any?): any
 			return math.floor(w.clock:now() + (opts.skew or 0))
 		end,
 		serverId = opts.serverId or "A",
+		readOptions = { UseCache = false },
 		length = 100,
 		config = w.config,
 		Season = Season,
@@ -308,6 +309,34 @@ return {
 			assert(w3.tally:record(1, 40))
 			w3.clock.t = 1210
 			assert(w3.tally:push(1) and w3.orderedWrites == 0, "season 1 is two seasons back")
+		end,
+	},
+	{
+		name = "tick reads the key and writes only when it is missing",
+		run = function()
+			local w = build()
+			w.clock.t = 1050
+			assert(w.tally:tick() == 1)
+			assert(w.ds.calls == 1, "the missing key is written once")
+			assert(w.tally:tick() == 1 and w.tally:tick() == 1)
+			assert(w.ds.calls == 1, `an existing key costs no write: {w.ds.calls}`)
+			closeStored(w, 1, 1100)
+			w.tally:tick()
+			assert(w.ds.calls == 1 and w.tally.known[1].state == "closed", "and the read still sees a close")
+		end,
+	},
+	{
+		name = "a cancelled open, with the store answering nil, reads what the rival wrote",
+		run = function()
+			local w = build()
+			w.ds.cancelReturnsNil = true
+			w.ds:hookNext(function()
+				w.records["season/1"] = Season.open(nil, 1, 1000, 1100)
+				w.records["season/1"].closedBy = "rival"
+			end)
+			local opened = w.tally:ensureOpen(1)
+			assert(opened ~= nil and opened.closedBy == "rival", "the stored value, read after the cancel")
+			assert(w.tally.known[1] ~= nil and w.tally.known[1].closedBy == "rival")
 		end,
 	},
 	{

@@ -290,6 +290,7 @@ function World.server(self: World, name: string, sopts: ServerOpts?): Server
 	})
 	local deps: any = {
 		seasons = seasons,
+		readOptions = { UseCache = false },
 		leaderboard = s.leaderboard,
 		profiles = {
 			get = function(userId: number): any?

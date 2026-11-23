@@ -46,6 +46,7 @@ The season key is the single source of truth about how a season ended. The playe
 - **A server with a slow clock waits.** It can't close early, and its late `record` is refused once the profile has been paid.
 - **Payout: one save.** For each season in the profile that has a score, isn't paid and is older than the current one, the server decides from the closed season key: the tier from the player's own score, plus the podium bonus if they are on the stored podium. It applies the Coins, sets `rewarded` and `tier`, adds a notice and saves once, bound to the live session's profile. If the save fails, the change is put back and the next settle tries again.
 - **No board, no podium.** If the board can't be read, a close waits and tries again on the next settle. Only once reads have kept failing for `PodiumWaitSeconds` (an hour), counted from the first failed attempt on that server (not from the season's end, so a first player who joins hours after the end does not freeze an empty podium on one bad read), does the season close without a podium. Tier rewards are unaffected.
+- **One close at a time.** A server runs one close per season at once. Players who settle while it is running are left until their next settle, then paid from the stored close, so a full server does not read the board once per player.
 - **When it runs.** Settle runs on join and then every `SettleSeconds` (60) for each player, behind a per-player lock so two settles can't overlap.
 
 ### What a crash does
@@ -174,10 +175,10 @@ rojo build -o build/tally.rbxl
 lune run tests/run
 ```
 
-348 tests, all passing:
+365 tests, all passing:
 
 - Pure rules (Season, Scores, Payout and Streak): every refusal, the season window maths, tier and podium decisions, and the streak's continue, restart and same-day cases.
-- Tally scoring, settle and streak: the rules applied to a profile, including a failed save rolling back and a season that can't pay until it is closed.
+- Tally scoring, settle and streak: the rules applied to a profile, including a failed save rolling back, a season that can't pay until it is closed, the last push interval of a season reaching its board and podium, a close that waits from the first failed board read, one close at a time, uncached season reads, and a season key from another window being refused.
 - Races: two servers closing the same season with different podium views (the first write wins and both pay from the stored podium), a server whose clock is behind, and a rejoin on another server mid-payout, each with a negative control.
 - Crash at every write: crash injection at every write of the close, the payout save, the streak save, the leaderboard write, autosave and release, in both modes (the server stops with the write unapplied, or the write lands and its answer is lost). After each, the servers restart over the stored records and a conservation check counts rewards, Coins and lifetime stats. The negative controls break the walk's own guarantees and each must fail it.
 - Session conservation: the same checks through the real `init.server.luau`, Sessions, Store and Lease over stand-in services, including a leave and rejoin mid-settle, a lease taken by another server mid-settle, a leave mid-settle and a shutdown with a hung save.
@@ -190,7 +191,7 @@ lune run tests/run
 
 Every race and crash spec has a negative control: a deliberately broken version that must fail it.
 
-**Mutation runner.** `lune run tests/mutate` applies each of the 30 patches in `tests/mutants` to a throwaway copy of `src` and `tests`, runs the full suite there and requires a failure. The mutants break one behaviour each, among them: a close without the not-ended check, a payout from a clock read with no close write, a reward without the paid flag, the paid flag in a separate save, a record after the season is paid, the streak's same-day check loosened, a save not bound to the profile, Browse with no refresh cache, and a podium read from the live board instead of the stored one. A mutant that survives, or whose find text no longer matches (stale), or that breaks the build, fails the run. `lune run tests/mutate -- --self-check` proves the runner itself. Currently 30 killed, none surviving.
+**Mutation runner.** `lune run tests/mutate` applies each of the 50 patches in `tests/mutants` to a throwaway copy of `src` and `tests`, runs the full suite there and requires a failure. The mutants break one behaviour each, among them: a close without the not-ended check, a payout from a clock read with no close write, a reward without the paid flag, the paid flag in a separate save, a record after the season is paid, the streak's same-day check loosened, a save not bound to the profile, Browse with no refresh cache, a podium read from the live board instead of the stored one, the previous season never pushed, the podium wait measured from the season's end, every player starting a close, a season key from another window accepted, and both paid-flag guards removed together (a patch may change more than one place). A mutant that survives, or whose find text no longer matches (stale), or that breaks the build, fails the run. `lune run tests/mutate -- --self-check` proves the runner itself. Currently 50 killed, none surviving.
 
 The client script and the UI can't run under Lune. They build with Rojo and are checked in Studio. The stand-in the server script runs on models only the members it uses, but it is not Roblox. The runner counts a test that yields and never finishes as a failure, so a hung test can't end the run with no output.
 
@@ -203,6 +204,12 @@ The client script and the UI can't run under Lune. They build with Rojo and are 
 - **The leaderboard lags.** Scores reach the ordered store on a timer and Browse reads a per-server cache, so the board can trail a player's real score by up to `BoardPushSeconds` plus `BoardRefreshSeconds`.
 - **Players settle only while in a game.** Nothing is pushed to an offline player. A reward is paid on their next join, and for a player already in a game on the 60 second poll.
 - **A late score can be refused.** A score recorded after the season's end by that server's clock, or after the server has seen the close, is refused and not carried into the next season.
+- **Crash walks cover one crashing server per scenario.** Server A is crashed at each write; the servers that restart afterwards are not crashed in turn, so a second failure during recovery is not walked.
+- **A fast clock can close a season early.** A close is judged by the closing server's clock `CloseGraceSeconds` behind its own, so a clock running more than that many seconds fast can close a season before it has really ended. Its podium then misses the last scores, and a score recorded after that close is refused.
+- **A rejoin refills the store allowance.** The per-player allowance for calls that write to the DataStore is kept in memory and forgotten when the player leaves, so leaving and rejoining gives a fresh burst. Roblox's own request budget still applies.
+- **The board can hold points that were never saved.** A score is pushed to the ordered store before the next autosave, so a server that crashes between the two leaves the board (and a podium frozen from it) with points the profile does not have. The player is paid on the profile's score, so their tier is unaffected.
+- **Tiers are read from the config at pay time.** A payout uses the tiers and podium bonuses in the config of the server that pays it, so a config rollout while servers run mixed versions can pay one player on one table and another on the next.
+- **The notice cap can be exceeded for a moment.** A payout or claim that has to be rolled back puts the notices it dropped back, so if other notices were added while its save was in flight the list can briefly hold more than `NoticeCap`. The next notice trims it. Only the toast list is affected.
 - **The streak day is UTC,** not the player's local day.
 - **Scores are whatever the game records.** The kit can't tell a fair score from a game bug, so an exploitable scoring rule in the game is still exploitable.
 - **Season keys are kept for ever.** They stay as small records, and there is no cleanup sweep.

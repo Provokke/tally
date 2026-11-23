@@ -7,6 +7,9 @@ Tally.__index = Tally
 
 export type Deps = {
 	seasons: any, -- a DataStore handle: UpdateAsync and GetAsync
+	-- The options every season read passes to GetAsync: a DataStoreGetOptions with UseCache false,
+	-- so a read that follows a close or a cancelled write is never a stale local copy.
+	readOptions: any?,
 	leaderboard: any, -- a Leaderboard
 	-- save writes the profile the caller changed. `undo`, when given, is run by the save, under the
 	-- session's lock, if the write does not land, so no other write can store the change first.
@@ -32,6 +35,7 @@ export type Tally = typeof(setmetatable(
 		known: { [number]: any }, -- the last stored value seen for each season id
 		settling: { [number]: boolean },
 		calling: { [number]: boolean },
+		closing: { [number]: boolean }, -- seasons this server is closing right now
 		boardFailedAt: { [number]: number }, -- when a season's podium read first failed, until one works
 		mismatched: { [number]: boolean }, -- seasons whose stored window is not the config's
 	},
@@ -44,6 +48,7 @@ function Tally.new(deps: Deps): Tally
 		known = {},
 		settling = {},
 		calling = {},
+		closing = {},
 		boardFailedAt = {},
 		mismatched = {},
 	}, Tally)
@@ -62,6 +67,19 @@ function Tally.view(self: Tally, id: number): any
 	end
 	local _, endsAt = self.deps.Season.window(self.deps.config.Epoch, self.deps.length, id)
 	return { endsAt = endsAt, state = "open" }
+end
+
+-- Reads season/<id> without the local cache. (false) when the read raised, else (true, the stored
+-- value or nil when the key is missing).
+local function fetch(self: Tally, id: number): (boolean, any)
+	local ok, stored = pcall(function()
+		return self.deps.seasons:GetAsync(self.deps.Season.key(id), self.deps.readOptions)
+	end)
+	if not ok then
+		self.deps.log(`season {id} read failed: {tostring(stored)}`)
+		return false, nil
+	end
+	return true, stored
 end
 
 -- Takes a stored season as this server's view of it, unless the window it holds is not the one the
@@ -90,23 +108,24 @@ end
 -- Reads season/<id>. A read that raises is nil (the caller waits for the next poll), and so is a
 -- key that is missing or does not match the config's window.
 function Tally.read(self: Tally, id: number): any?
-	local ok, stored = pcall(function()
-		return self.deps.seasons:GetAsync(self.deps.Season.key(id))
-	end)
-	if not ok then
-		self.deps.log(`season {id} read failed: {tostring(stored)}`)
-		return nil
-	end
-	if stored == nil then
+	local ok, stored = fetch(self, id)
+	if not ok or stored == nil then
 		return nil
 	end
 	return accept(self, id, stored)
 end
 
--- Creates season/<id> if it is missing and returns what is stored. Season.open is idempotent, so
--- any server may call it for any season, current or past.
+-- Makes sure season/<id> exists and returns what is stored. The key is read first and written only
+-- when it is missing: Season.open is idempotent, so a rival that creates it first just wins.
 function Tally.ensureOpen(self: Tally, id: number): any?
 	local deps = self.deps
+	local read, stored = fetch(self, id)
+	if not read then
+		return nil
+	end
+	if stored ~= nil then
+		return accept(self, id, stored)
+	end
 	local startsAt, endsAt = deps.Season.window(deps.config.Epoch, deps.length, id)
 	local ok, result = pcall(function()
 		return deps.seasons:UpdateAsync(deps.Season.key(id), function(current: any)
@@ -212,7 +231,7 @@ local function closeClock(self: Tally): number
 	return self.deps.now() - self.deps.config.CloseGraceSeconds
 end
 
-local function closeSeason(self: Tally, id: number): any?
+local function closeOnce(self: Tally, id: number): any?
 	local deps = self.deps
 	local podium, why = deps.leaderboard:read(id, deps.config.PodiumSize)
 	if podium == nil then
@@ -251,6 +270,22 @@ local function closeSeason(self: Tally, id: number): any?
 		return self:read(id)
 	end
 	return accept(self, id, result)
+end
+
+-- One close per season at a time on this server: while one settle is in the board read or the
+-- write, the other players' settles leave the season alone (nil, as a wait) and are paid from the
+-- stored close on their next settle, rather than each reading the board and writing a close.
+local function closeSeason(self: Tally, id: number): any?
+	if self.closing[id] then
+		return nil
+	end
+	self.closing[id] = true
+	local ok, result = pcall(closeOnce, self, id)
+	self.closing[id] = nil
+	if not ok then
+		error(result, 0)
+	end
+	return result
 end
 
 -- One in-memory change (Coins, the paid flag, the notice), then one save bound to this profile.

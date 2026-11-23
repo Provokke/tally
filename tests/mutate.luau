@@ -9,7 +9,9 @@
 local fs = require("@lune/fs")
 local process = require("@lune/process")
 
-type Mutant = { name: string, file: string, find: string, replace: string }
+type Edit = { file: string, find: string, replace: string }
+-- `more` lists further edits applied in the same copy, for a break that needs two places changed.
+type Mutant = { name: string, file: string, find: string, replace: string, more: { Edit }? }
 type Result = { name: string, status: "killed" | "survived" | "stale" | "broken", detail: string }
 
 local function tempRoot(): string
@@ -49,21 +51,27 @@ local function runOne(mutant: Mutant, dir: string): Result
 	fs.writeDir(dir)
 	fs.copy("src", dir .. "/src")
 	fs.copy("tests", dir .. "/tests")
-	local path = dir .. "/" .. mutant.file
-	if not fs.isFile(path) then
-		return { name = mutant.name, status = "stale", detail = `{mutant.file} does not exist` }
+	local edits: { Edit } = { { file = mutant.file, find = mutant.find, replace = mutant.replace } }
+	for _, edit in mutant.more or {} do
+		table.insert(edits, edit)
 	end
-	local text = string.gsub(fs.readFile(path), "\r\n", "\n")
-	local found = countPlain(text, mutant.find)
-	if found ~= 1 then
-		return {
-			name = mutant.name,
-			status = "stale",
-			detail = `find matched {found} times in {mutant.file}, expected exactly 1`,
-		}
+	for _, edit in edits do
+		local path = dir .. "/" .. edit.file
+		if not fs.isFile(path) then
+			return { name = mutant.name, status = "stale", detail = `{edit.file} does not exist` }
+		end
+		local text = string.gsub(fs.readFile(path), "\r\n", "\n")
+		local found = countPlain(text, edit.find)
+		if found ~= 1 then
+			return {
+				name = mutant.name,
+				status = "stale",
+				detail = `find matched {found} times in {edit.file}, expected exactly 1`,
+			}
+		end
+		local at = string.find(text, edit.find, 1, true) :: number
+		fs.writeFile(path, string.sub(text, 1, at - 1) .. edit.replace .. string.sub(text, at + #edit.find))
 	end
-	local at = string.find(text, mutant.find, 1, true) :: number
-	fs.writeFile(path, string.sub(text, 1, at - 1) .. mutant.replace .. string.sub(text, at + #mutant.find))
 
 	local ran = process.spawn("lune", { "run", "tests/run" }, { cwd = dir })
 	if ran.ok then

@@ -83,6 +83,45 @@ return {
 		end,
 	},
 	{
+		name = "a cancelled update returns the stored value, or nil when the store is set to answer a cancel with nil",
+		run = function()
+			local ds = FakeDataStore.new({ k = { n = 1 } })
+			local cancelled = ds:UpdateAsync("k", function()
+				return nil
+			end)
+			assert(cancelled ~= nil and cancelled.n == 1, "by default a cancel returns what is stored")
+			ds.cancelReturnsNil = true
+			local nothing = ds:UpdateAsync("k", function()
+				return nil
+			end)
+			assert(nothing == nil, "in nil mode a cancel returns nil")
+			assert(ds.records.k.n == 1, "and writes nothing")
+			local written = ds:UpdateAsync("k", function()
+				return { n = 2 }
+			end)
+			assert(
+				written ~= nil and written.n == 2 and ds.records.k.n == 2,
+				"a write still returns its value"
+			)
+		end,
+	},
+	{
+		name = "a handle with a read cache serves the cached value unless the read asks for UseCache = false",
+		run = function()
+			local clock = FakeClock.new(0)
+			local ds = FakeDataStore.new({ k = { n = 1 } })
+			local handle = ds:handle(Faults.new(), { cacheSeconds = 60, clock = clock })
+			assert(handle:GetAsync("k").n == 1)
+			ds.records.k = { n = 2 }
+			assert(handle:GetAsync("k").n == 1, "cached")
+			assert(handle:GetAsync("k", { UseCache = false }).n == 2, "an uncached read sees the store")
+			assert(
+				#ds.gets == 3 and not ds.gets[2].uncached and ds.gets[3].uncached,
+				"and each read is recorded"
+			)
+		end,
+	},
+	{
 		name = "a lost write does not refresh the read cache: the client never saw the response",
 		run = function()
 			local clock = FakeClock.new(1000)

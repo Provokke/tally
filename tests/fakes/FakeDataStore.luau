@@ -26,6 +26,8 @@ export type FakeDataStore = typeof(setmetatable(
 		commitFailures: number,
 		commitMessage: string,
 		reruns: number,
+		gets: { { key: string, uncached: boolean } }, -- every GetAsync, and whether it asked for UseCache = false
+		cancelReturnsNil: boolean, -- a cancelled transform makes UpdateAsync return nil rather than the stored value
 		hooks: { (key: string) -> () },
 		events: { string }?, -- when set, "call <key>" is appended at the start of each UpdateAsync, "get <key>" at the start of each GetAsync
 	},
@@ -42,6 +44,8 @@ function FakeDataStore.new(records: { [string]: any }?): FakeDataStore
 		commitFailures = 0,
 		commitMessage = "",
 		reruns = 0,
+		gets = {},
+		cancelReturnsNil = false,
 		hooks = {},
 		events = nil,
 	}, FakeDataStore)
@@ -149,7 +153,12 @@ function FakeDataStore.UpdateAsync(self: FakeDataStore, key: string, transform: 
 		if forcedReruns > 0 then
 			forcedReruns -= 1
 		elseif result == nil then
-			return Deep.copy(before) -- cancelled: nothing is written
+			-- Cancelled: nothing is written. What the call then returns is the stored value, or nil
+			-- when `cancelReturnsNil` says the store answers a cancel with nil.
+			if self.cancelReturnsNil then
+				return nil
+			end
+			return Deep.copy(before)
 		elseif self.records[key] == before then
 			self.records[key] = Deep.copy(result)
 			if self.commitFailures > 0 then
@@ -207,6 +216,7 @@ function FakeDataStore.handle(self: FakeDataStore, faults: Faults.Faults, option
 			table.insert(self.events, "get " .. key)
 		end
 		faults:beforeRead()
+		table.insert(self.gets, { key = key, uncached = getOptions ~= nil and getOptions.UseCache == false })
 		if cacheSeconds ~= nil and not (getOptions ~= nil and getOptions.UseCache == false) then
 			local hit = cache[key]
 			if hit ~= nil and cacheNow() - hit.at < cacheSeconds then

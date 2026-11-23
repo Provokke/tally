@@ -40,17 +40,27 @@ local function build(options: any?): any
 	w.records = opts.records or {}
 	w.ds = FakeDataStore.new(w.records)
 	w.faults = Faults.new()
-	w.handle = w.ds:handle(w.faults)
+	-- `cacheSeconds` gives the season handle a read cache like Roblox's, on this world's clock.
+	w.handle = w.ds:handle(
+		w.faults,
+		if opts.cacheSeconds ~= nil then { cacheSeconds = opts.cacheSeconds, clock = w.clock } else nil
+	)
 	w.ordered = FakeOrderedDataStore.new(w.clock, 0)
 	w.orderedHandle = w.ordered:handle(Faults.new())
 	w.boardDown = false
+	w.boardReads = 0
 	local board: any = {
 		SetAsync = function(_: any, key: string, value: number)
 			w.orderedHandle:SetAsync(key, value)
 		end,
 		GetSortedAsync = function(_: any, ...: any)
+			w.boardReads += 1
 			if w.boardDown then
 				error("ordered store is down")
+			end
+			if w.parkBoard then
+				w.parkBoard = false
+				coroutine.yield()
 			end
 			return w.orderedHandle:GetSortedAsync(...)
 		end,
@@ -98,6 +108,7 @@ local function build(options: any?): any
 			return math.floor(w.clock:now())
 		end,
 		serverId = opts.serverId or "A",
+		readOptions = { UseCache = false },
 		length = opts.length or 100,
 		config = w.config,
 		Season = Season,
@@ -491,6 +502,83 @@ return {
 			resume(run)
 			assert(run.paid == 0, `paid {run.paid}`)
 			assert(w.live[1].coins == 0 and w.saves == 0 and #w.live[1].notices == 0)
+		end,
+	},
+	{
+		name = "players settling at once start one close between them: one board read, one close write, and the others are paid next settle",
+		run = function()
+			local w = world()
+			w.live[2] = newProfile({ ["1"] = 40 })
+			w.live[3] = newProfile({ ["1"] = 10 })
+			storeOpen(w, 1)
+			w.parkBoard = true
+			local first = settleAsync(w, 1)
+			assert(first.paid == nil and w.boardReads == 1, "the first is parked in the board read")
+			assert(
+				w.tally:settle(2) == 0 and w.tally:settle(3) == 0,
+				"the others do not start a second close"
+			)
+			assert(w.boardReads == 1 and w.ds.calls == 0, "no second read, no write")
+			resume(first)
+			assert(first.paid == 1 and w.records["season/1"].state == "closed")
+			assert(w.ds.calls == 1, `one close write: {w.ds.calls}`)
+			assert(w.tally:settle(2) == 1 and w.tally:settle(3) == 1, "the next settle pays them")
+			assert(w.boardReads == 1 and w.ds.calls == 1, "from the stored close")
+			assert(w.live[2].coins == 250 and w.live[3].coins == 50)
+		end,
+	},
+	{
+		name = "a close that raises releases the one-close guard, so the next settle can close",
+		run = function()
+			local w = world()
+			storeOpen(w, 1)
+			w.ds:failNext(1, "boom")
+			assert(w.tally:settle(1) == 0)
+			assert(w.tally:settle(1) == 1, "not stuck behind the failed close")
+			-- a raise inside the close itself (not a failed store call) leaves the guard released too
+			local w2 = world()
+			storeOpen(w2, 1)
+			local real = w2.tally.deps.leaderboard
+			w2.tally.deps.leaderboard = {
+				read = function()
+					error("a raise inside the close")
+				end,
+			}
+			assert(w2.tally:settle(1) == 0, "settle never throws")
+			assert(w2.tally.closing[1] == nil, "and the guard is released after the raise")
+			w2.tally.deps.leaderboard = real
+			assert(w2.tally:settle(1) == 1)
+		end,
+	},
+	{
+		-- Roblox's GetAsync serves a cached value for a few seconds. The read after a cancelled close
+		-- must be the stored one, or the server decides from its own stale copy and closes again.
+		name = "season reads bypass the local cache: a close cancelled by a rival is read back from the store",
+		run = function()
+			local w = world(nil, nil, { cacheSeconds = 60 })
+			w.ds.cancelReturnsNil = true
+			storeOpen(w, 1)
+			assert(w.handle:GetAsync("season/1").state == "open", "something cached the open key")
+			w.records["season/1"] =
+				Season.close(w.records["season/1"], 1100, { { userId = 2, score = 99 } }, "B")
+			assert(w.tally:settle(1) == 1)
+			assert(w.live[1].coins == 150, `paid from the rival's podium: {w.live[1].coins}`)
+			assert(w.records["season/1"].closedBy == "B")
+		end,
+	},
+	{
+		name = "a rival close between the read and the close write, with the store answering a cancel with nil, still pays from the rival's podium",
+		run = function()
+			local w = world()
+			w.ds.cancelReturnsNil = true
+			storeOpen(w, 1)
+			w.ds:hookNext(function()
+				w.records["season/1"] =
+					Season.close(w.records["season/1"], 1100, { { userId = 2, score = 99 } }, "B")
+			end)
+			assert(w.tally:settle(1) == 1)
+			assert(w.records["season/1"].closedBy == "B")
+			assert(w.live[1].coins == 150, `paid from the stored podium: {w.live[1].coins}`)
 		end,
 	},
 	{

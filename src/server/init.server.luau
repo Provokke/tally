@@ -308,8 +308,14 @@ leaderboard = Leaderboard.new({
 	log = log,
 })
 
+-- Season reads that decide a close or a payout must come from the store: GetAsync would otherwise
+-- serve a cached copy for a few seconds, which can be the open key a rival has since closed.
+local uncachedRead = Instance.new("DataStoreGetOptions")
+uncachedRead.UseCache = false
+
 tally = Tally.new({
 	seasons = seasonStore,
+	readOptions = uncachedRead,
 	leaderboard = leaderboard,
 	profiles = {
 		-- Only a session that would be saved may change anything: a read-only or lost one has no
