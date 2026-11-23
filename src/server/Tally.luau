@@ -32,13 +32,13 @@ export type Tally = typeof(setmetatable(
 		known: { [number]: any }, -- the last stored value seen for each season id
 		settling: { [number]: boolean },
 		calling: { [number]: boolean },
-		waitedForBoard: { [number]: boolean }, -- seasons whose podium wait has been logged
+		boardFailedAt: { [number]: number }, -- when a season's podium read first failed, until one works
 	},
 	Tally
 ))
 
 function Tally.new(deps: Deps): Tally
-	return setmetatable({ deps = deps, known = {}, settling = {}, calling = {}, waitedForBoard = {} }, Tally)
+	return setmetatable({ deps = deps, known = {}, settling = {}, calling = {}, boardFailedAt = {} }, Tally)
 end
 
 function Tally.currentId(self: Tally): number?
@@ -178,23 +178,29 @@ local function closeClock(self: Tally): number
 	return self.deps.now() - self.deps.config.CloseGraceSeconds
 end
 
-local function closeSeason(self: Tally, id: number, season: any): any?
+local function closeSeason(self: Tally, id: number): any?
 	local deps = self.deps
 	local podium, why = deps.leaderboard:read(id, deps.config.PodiumSize)
 	if podium == nil then
 		-- A board that can't be read now may be back on the next settle, so wait rather than freeze
-		-- an empty podium for everyone. Only once it has stayed unreadable PodiumWaitSeconds past the
-		-- end does the season close without one, so a board that never returns can't block rewards.
-		if closeClock(self) < season.endsAt + deps.config.PodiumWaitSeconds then
-			-- Logged once per season, not on every poll for every player.
-			if not self.waitedForBoard[id] then
-				self.waitedForBoard[id] = true
-				deps.log(`podium read failed for season {id}, waiting: {tostring(why)}`)
-			end
+		-- an empty podium for everyone. Only once reads have kept failing for PodiumWaitSeconds, from
+		-- the first failed attempt this server made, does the season close without one, so a board
+		-- that never returns can't block rewards. (Measured from the season's end, a first player who
+		-- joined hours late would freeze an empty podium on one failed read.)
+		local failedAt = self.boardFailedAt[id]
+		if failedAt == nil then
+			-- Logged once per outage, not on every poll for every player.
+			failedAt = deps.now()
+			self.boardFailedAt[id] = failedAt
+			deps.log(`podium read failed for season {id}, waiting: {tostring(why)}`)
+		end
+		if deps.now() - failedAt < deps.config.PodiumWaitSeconds then
 			return nil
 		end
 		deps.log(`podium read failed for season {id}, closing without one: {tostring(why)}`)
 		podium = {}
+	else
+		self.boardFailedAt[id] = nil
 	end
 	local now = closeClock(self)
 	local ok, result = pcall(function()
@@ -267,7 +273,7 @@ local function settleSeasons(self: Tally, userId: number): number
 			if decision.action == "open" then
 				season = self:ensureOpen(id)
 			elseif decision.action == "close" then
-				season = closeSeason(self, id, season)
+				season = closeSeason(self, id)
 			elseif decision.action == "pay" then
 				if not applyPayout(self, userId, profile, key, decision) then
 					return paid

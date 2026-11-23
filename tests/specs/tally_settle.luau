@@ -344,28 +344,68 @@ return {
 		end,
 	},
 	{
-		name = "a board that is down at the close waits, then closes without a podium once the wait has run out",
+		name = "a board that is down at the close waits, then closes without a podium once it has stayed down for the wait",
 		run = function()
 			local w = world()
 			storeOpen(w, 1)
 			w.boardDown = true
-			w.clock.t = 1100 + GRACE + 1
+			local firstFail = 1100 + GRACE + 1
+			w.clock.t = firstFail
 			assert(w.tally:settle(1) == 0)
 			assert(w.ds.calls == 0 and w.records["season/1"].state == "open", "no close write")
 			assert(logged(w, "waiting") == 1 and logged(w, "closing without one") == 0)
 			assert(w.saves == 0 and w.live[1].coins == 0)
 
-			w.clock.t = 1100 + GRACE + WAIT - 1
+			w.clock.t = firstFail + WAIT - 1
 			assert(w.tally:settle(1) == 0, "still waiting one second before the wait runs out")
 			assert(logged(w, "waiting") == 1, "the wait is logged once per season, not on every poll")
 			assert(w.records["season/1"].state == "open")
 
-			w.clock.t = 1100 + GRACE + WAIT
+			w.clock.t = firstFail + WAIT
 			assert(w.tally:settle(1) == 1)
 			local stored = w.records["season/1"]
 			assert(stored.state == "closed" and #stored.podium == 0, "closed with an empty podium")
 			assert(w.live[1].coins == 150, `the tier only: {w.live[1].coins}`)
 			assert(logged(w, "closing without one") == 1)
+		end,
+	},
+	{
+		-- The wait is measured from the first failed read, not from the season's end: a first
+		-- player who joins hours after the end and meets one failed read must not freeze an empty
+		-- podium for everyone.
+		name = "a season that ended long ago waits for the board from the first failed read, not from its end, and closes with the real podium",
+		run = function()
+			local w = world(nil, nil, { start = 1100 + 7200 })
+			storeOpen(w, 1)
+			w.boardDown = true
+			assert(w.tally:settle(1) == 0, "the one failed read waits")
+			assert(w.records["season/1"].state == "open" and w.ds.calls == 0, "no close written")
+			assert(logged(w, "closing without one") == 0, table.concat(w.logs, "; "))
+			w.boardDown = false
+			w.clock.t += 30
+			assert(w.tally:settle(1) == 1)
+			assert(#w.records["season/1"].podium == 2, "the real podium, not an empty one")
+			assert(w.live[1].coins == 450)
+			assert(logged(w, "closing without one") == 0)
+		end,
+	},
+	{
+		name = "a board read that succeeds clears the failure, so a later outage waits the whole time again",
+		run = function()
+			local w = world(nil, nil, { start = 1100 + GRACE })
+			storeOpen(w, 1)
+			w.boardDown = true
+			assert(w.tally:settle(1) == 0)
+			w.boardDown = false
+			w.clock.t += WAIT / 2
+			-- The board answers, but the close write itself fails: nothing is written.
+			w.ds:failNext(1, "boom")
+			assert(w.tally:settle(1) == 0)
+			w.boardDown = true
+			w.clock.t += WAIT / 2 + 1
+			assert(w.tally:settle(1) == 0, "the outage that began after the good read has not run out")
+			assert(w.records["season/1"].state == "open")
+			assert(logged(w, "closing without one") == 0, table.concat(w.logs, "; "))
 		end,
 	},
 	{

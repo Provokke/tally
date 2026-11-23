@@ -3,6 +3,6 @@
 return {
 	name = "payout_from_clock",
 	file = "src/server/Tally.luau",
-	find = "season = closeSeason(self, id, season)",
+	find = "season = closeSeason(self, id)",
 	replace = 'season = deps.Season.close(season, deps.now(), {}, "clock") or season',
 }
