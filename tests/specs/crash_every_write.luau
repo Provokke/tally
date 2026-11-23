@@ -5,6 +5,9 @@
 -- dead, a fresh server settles until quiet, and the store's records must conserve Coins. A failure
 -- names the scenario, k and the mode.
 --
+-- Only server A is crashed: a claim here covers one crashing server per scenario. In
+-- restart_mid_settle B runs after the crash but its writes are not walked.
+--
 -- The walk is over the writes it observed, not a count it was given: the clean run records each
 -- write A made (its number, its key and the operation that made it), every armed run must hit the
 -- same write as the clean run did, and a scenario lists the kinds of write it has to cover, so a

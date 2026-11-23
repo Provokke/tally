@@ -306,9 +306,27 @@ local function race2(_order: Order, broken: Broken?): Result
 	w:seedBoard(1, { [1] = 60, [2] = 40, [3] = 5 })
 	local log: { string } = {}
 	local start0 = w.config.StartingCoins
-	w.clock:advance(101) -- real 1101: A reads 1161
+	-- A fast clock must wait out the grace: at real 1099 A reads 1159, past the end (1100), but its
+	-- close clock reads 1099. A grace smaller than the skew would let it close and pay here.
+	w.clock:advance(99)
 	a:join(1)
 	a:tick()
+	-- A may look at season 1 (a no-op write to the season key), but must not close it or save a profile.
+	local paid1 = a:settle(1)
+	local season1 = w.records["season/1"]
+	local profileWrites = 0
+	for _, write in a.trace do
+		if string.find(write.kind, ":profile", 1, true) ~= nil then
+			profileWrites += 1
+		end
+	end
+	if paid1 ~= 0 or season1.state ~= "open" or season1.closedBy ~= nil or profileWrites ~= 0 then
+		return result(w, log, "season 1 closed early by A: its close clock was 1099 of 1100")
+	end
+	if stored(w, 1).coins ~= start0 then
+		return result(w, log, "A paid player 1 before its close clock reached the end")
+	end
+	w.clock:advance(2) -- real 1101: A reads 1161
 	if a:settle(1) ~= 1 then
 		return result(w, log, "A did not pay player 1 at real 1101")
 	end
@@ -438,6 +456,21 @@ local function race3(order: Order, broken: Broken?): Result
 			`player 1 was not paid exactly once: {data.coins} Coins, reward {tostring(entry.reward)}`
 		)
 	end
+	-- Exactly one payout in the whole store, not one per server.
+	local total = 0
+	for userId = 1, 3 do
+		total += stored(w, userId).coins
+	end
+	if total ~= 3 * w.config.StartingCoins + 450 then
+		return result(
+			w,
+			log,
+			`the store holds {total} Coins, not three starts plus exactly one payout of 450`
+		)
+	end
+	if order == "AB" and (indexOf(log, "A Player_1") == nil or indexOf(log, "B Player_1") == nil) then
+		return result(w, log, "both servers must have saved player 1, or nothing raced")
+	end
 	return result(w, log, settledAndConserved(w))
 end
 
@@ -473,8 +506,14 @@ for _, order in { "AB", "BA" :: Order } do
 		local r = race3(o, nil)
 		assert(r.ok, r.why)
 	end)
-	control("pays from the live board, not the stored podium", race1, o, "live_podium", "podium")
-	control("never records the paid flag", race3, o, "no_paid_flag", "rewarded")
+	control(
+		"pays from the live board, not the stored podium",
+		race1,
+		o,
+		"live_podium",
+		"not paid from the stored podium"
+	)
+	control("never records the paid flag", race3, o, "no_paid_flag", "not marked rewarded after the race")
 end
 
 add("race 2: a server behind can't close early and its late record is refused once paid", function()
