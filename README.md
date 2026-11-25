@@ -4,7 +4,7 @@
 
 Seasons, leaderboards and season-end rewards for Roblox, with each reward paid exactly once across servers and crashes (proven against Lune fakes). It leaves out the game's scoring rules, reward art and anything a player does with Coins. Player data is saved with a session lease, the same store as [satchel](https://github.com/Provokke/satchel).
 
-![Licence](https://img.shields.io/badge/LICENCE-MIT-blue?style=for-the-badge)  ![Language](https://img.shields.io/badge/LUAU-00A2FF?style=for-the-badge&logo=roblox&logoColor=white)  ![Tests](https://img.shields.io/badge/TESTS-348-brightgreen?style=for-the-badge)
+![Licence](https://img.shields.io/badge/LICENCE-MIT-blue?style=for-the-badge)  ![Language](https://img.shields.io/badge/LUAU-00A2FF?style=for-the-badge&logo=roblox&logoColor=white)  ![Tests](https://img.shields.io/badge/TESTS-369-brightgreen?style=for-the-badge)
 
 Refer to [LICENSE](LICENSE) for the legal bits.
 
