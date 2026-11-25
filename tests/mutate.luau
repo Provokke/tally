@@ -51,6 +51,9 @@ local function runOne(mutant: Mutant, dir: string): Result
 	fs.writeDir(dir)
 	fs.copy("src", dir .. "/src")
 	fs.copy("tests", dir .. "/tests")
+	if fs.isFile("rokit.toml") then
+		fs.copy("rokit.toml", dir .. "/rokit.toml")
+	end
 	local edits: { Edit } = { { file = mutant.file, find = mutant.find, replace = mutant.replace } }
 	for _, edit in mutant.more or {} do
 		table.insert(edits, edit)
